@@ -1,0 +1,36 @@
+chapter 1
+----------
+
+struct net_device {
+unsigned int irq; /* device IRQ number */
+. . .
+const struct net_device_ops *netdev_ops;
+. . .
+unsigned int mtu;
+. . .
+unsigned int promiscuity;
+. . .
+unsigned char *dev_addr;
+. . .
+};
+(include/linux/netdevice.h)
+
+struct sk_buff {
+. . .
+struct sock *sk;
+struct net_device *dev;
+. . .
+_u8 pkt_type:3,
+. . .
+_be16 protocol;
+. . .
+sk_buff_data_t tail;
+sk_buff_data_t end;
+unsigned char *head,
+*data;
+sk_buff_data_t transport_header;
+sk_buff_data_t network_header;
+sk_buff_data_t mac_header;
+. . .
+};
+(include/linux/skbuff.h)

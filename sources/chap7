@@ -1,0 +1,963 @@
+chapter 7
+----------
+
+struct neighbour {
+	struct neighbour __rcu *next;
+	struct neigh_table *tbl;
+	struct neigh_parms *parms;
+	unsigned long confirmed;
+	unsigned long updated;
+	rwlock_t lock;
+	atomic_t refcnt;
+	struct sk_buff_head arp_queue;
+	unsigned int arp_queue_len_bytes;
+	struct timer_list timer;
+	unsigned long used;
+	atomic_t probes;
+	_u8 flags;
+	_u8 nud_state;
+	_u8 type;
+	_u8 dead;
+	seqlock_t ha_lock;
+	unsigned char ha[ALIGN(MAX_ADDR_LEN, sizeof(unsigned long))];
+	struct hh_cache hh;
+	int (*output)(struct neighbour *, struct sk_buff *);
+	const struct neigh_ops *ops;
+	struct rcu_head rcu;
+	struct net_device *dev;
+	u8 primary_key[0];
+};
+
+(include/net/neighbour.h)
+
+struct neigh_table {
+	struct neigh_table *n;
+	int family;
+	int entry_size;
+	int key_len;
+	_u32 (*hash)(const void *pkey,
+		const struct net_device *dev,
+		_u32 *hash_rnd);
+	int (*constructor)(struct neighbour *);
+	int (*pconstructor)(struct pneigh_entry *);
+	void (*pdestructor)(struct pneigh_entry *);
+	void (*proxy_redo)(struct sk_buff *skb);
+	char *id;
+	struct neigh_parms parms;
+	/* HACK. gc_* should follow parms without a gap! */
+	int gc_interval;
+	int gc_thresh1;
+	int gc_thresh2;
+	int gc_thresh3;
+	unsigned long last_flush;
+	struct delayed_work gc_work;
+	struct timer_list proxy_timer;
+	struct sk_buff_head proxy_queue;
+	atomic_t entries;
+	rwlock_t lock;
+	unsigned long last_rand;
+	struct neigh_statistics __percpu *stats;
+	struct neigh_hash_table __rcu *nht;
+	struct pneigh_entry **phash_buckets;
+};
+
+(include/net/neighbour.h)
+
+
+static void neigh_table_init_no_netlink(struct neigh_table *tbl)
+{
+	. . .
+	RCU_INIT_POINTER(tbl->nht, neigh_hash_alloc(3));
+	. . .
+}
+
+static struct neigh_hash_table *neigh_hash_alloc(unsigned int shift)
+{
+	size_t size = (1 << shift) * sizeof(struct neighbour *);
+	struct neigh_hash_table *ret;
+	struct neighbour __rcu **buckets;
+	int i;
+	
+	ret = kmalloc(sizeof(*ret), GFP_ATOMIC);
+	if (!ret)
+		return NULL;
+	if (size <= PAGE_SIZE)
+		buckets = kzalloc(size, GFP_ATOMIC);
+	else
+		buckets = (struct neighbour __rcu **)
+	_get_free_pages(GFP_ATOMIC | __GFP_ZERO,
+		get_order(size));
+	. . .
+}	
+
+static struct packet_type arp_packet_type __read_mostly = {
+	.type = cpu_to_be16(ETH_P_ARP),
+	.func = arp_rcv,
+};
+void __init arp_init(void)
+{
+	. . .
+	dev_add_pack(&arp_packet_type);
+	. . .
+}
+(net/ipv4/arp.c)
+
+struct neigh_ops {
+	int family;
+	void (*solicit)(struct neighbour *, struct sk_buff *);
+	void (*error_report)(struct neighbour *, struct sk_buff *);
+	int (*output)(struct neighbour *, struct sk_buff *);
+	int (*connected_output)(struct neighbour *, struct sk_buff *);
+};
+
+(include/net/neighbour.h)
+
+static struct neighbour *neigh_alloc(struct neigh_table *tbl, struct net_device *dev)
+{
+	struct neighbour *n = NULL;
+	unsigned long now = jiffies;
+	int entries;
+	entries = atomic_inc_return(&tbl->entries) - 1;
+	if (entries >= tbl->gc_thresh3 ||
+		(entries >= tbl->gc_thresh2 &&
+			time_after(now, tbl->last_flush + 5 * HZ))) {
+			if (!neigh_forced_gc(tbl) &&
+				entries >= tbl->gc_thresh3)
+					goto out_entries;
+	}
+        . . .
+	
+struct neighbour *__neigh_create(struct neigh_table *tbl, const void *pkey,
+				 struct net_device *dev, bool want_ref)
+{
+	. . .
+	if (atomic_read(&tbl->entries) > ())
+		nht = neigh_hash_grow(tbl, nht->hash_shift + 1);
+	. . .
+	n->confirmed = jiffies - (n->parms->base_reachable_time << 1);
+	
+	
+}	
+
+struct arphdr {
+	_be16 ar_hrd; /* format of hardware address */
+	_be16 ar_pro; /* format of protocol address */
+	unsigned char ar_hln; /* length of hardware address */
+	unsigned char ar_pln; /* length of protocol address */
+	_be16 ar_op; /* ARP opcode (command) */
+#if 0
+*
+* Ethernet looks like this : This bit is variable sized however...
+*/
+	unsigned char ar_sha[ETH_ALEN]; /* sender hardware address */
+	unsigned char ar_sip[4]; /* sender IP address */
+	unsigned char ar_tha[ETH_ALEN]; /* target hardware address */
+	unsigned char ar_tip[4]; /* target IP address */
+#endif
+};
+
+static inline int ip_finish_output2(struct sk_buff *skb)
+{
+	struct dst_entry *dst = skb_dst(skb);
+	struct rtable *rt = (struct rtable *)dst;
+	struct net_device *dev = dst->dev;
+	unsigned int hh_len = LL_RESERVED_SPACE(dev);
+	struct neighbour *neigh;
+	u32 nexthop;
+	. . .
+	. . .
+	nexthop = (__force u32) rt_nexthop(rt, ip_hdr(skb)->daddr);
+	neigh = __ipv4_neigh_lookup_noref(dev, nexthop);
+	if (unlikely(!neigh))
+		neigh = __neigh_create(&arp_tbl, &nexthop, dev, false);
+	if (!IS_ERR(neigh)) {
+		int res = dst_neigh_output(dst, neigh, skb);
+	. . .
+}
+
+static inline int dst_neigh_output(struct dst_entry *dst, struct neighbour *n,
+				   struct sk_buff *skb)
+{
+	const struct hh_cache *hh;
+	if (dst->pending_confirm) {
+		unsigned long now = jiffies;
+		dst->pending_confirm = 0;
+		/* avoid dirtying neighbour */
+		if (n->confirmed != now)
+			n->confirmed = now;
+	}
+	hh = &n->hh;
+	if ((n->nud_state & NUD_CONNECTED) && hh->hh_len)
+		return neigh_hh_output(hh, skb);
+	else
+		return n->output(n, skb);
+}
+(include/net/dst.h)
+
+
+static void neigh_probe(struct neighbour *neigh)
+			_releases(neigh->lock)
+{
+	struct sk_buff *skb = skb_peek(&neigh->arp_queue);
+	. . .
+	neigh->ops->solicit(neigh, skb);
+	atomic_inc(&neigh->probes);
+	kfree_skb(skb);
+}
+
+static void arp_solicit(struct neighbour *neigh, struct sk_buff *skb)
+{
+	_be32 saddr = 0;
+	u8 dst_ha[MAX_ADDR_LEN], *dst_hw = NULL;
+	struct net_device *dev = neigh->dev;
+	_be32 target = *(__be32 *)neigh->primary_key;
+	int probes = atomic_read(&neigh->probes);
+	struct in_device *in_dev;
+	rcu_read_lock();
+	in_dev = __in_dev_get_rcu(dev);
+	if (!in_dev) {
+		rcu_read_unlock();
+		return;
+	}
+	
+	switch (IN_DEV_ARP_ANNOUNCE(in_dev)) {
+	default:
+	case 0: /* By default announce any local IP */
+		if (skb && inet_addr_type(dev_net(dev),
+			ip_hdr(skb)->saddr) == RTN_LOCAL)
+		saddr = ip_hdr(skb)->saddr;
+		break;
+	case 1: /* Restrict announcements of saddr in same subnet */
+		if (!skb)
+			break;
+		saddr = ip_hdr(skb)->saddr;
+		if (inet_addr_type(dev_net(dev), saddr) == RTN_LOCAL) {
+			/* saddr should be known to target */
+			if (inet_addr_onlink(in_dev, target, saddr))
+				break;
+		}
+		saddr = 0;
+		break;
+	case 2: /* Avoid secondary IPs, get a primary/preferred one */
+		break;
+	}
+	rcu_read_unlock();
+	if (!saddr)
+		saddr = inet_select_addr(dev, target, RT_SCOPE_LINK);
+	probes -= neigh->parms->ucast_probes;
+	if (probes < 0) {
+		if (!(neigh->nud_state & NUD_VALID))
+			pr_debug("trying to ucast probe in NUD_INVALID\n");
+		neigh_ha_snapshot(dst_ha, neigh, dev);
+		dst_hw = dst_ha;
+	} else {
+		probes -= neigh->parms->app_probes;
+		if (probes < 0) {
+#ifdef CONFIG_ARPD
+			neigh_app_ns(neigh);
+#endif
+			return;
+		}
+	}
+	arp_send(ARPOP_REQUEST, ETH_P_ARP, target, dev, saddr,
+		 dst_hw, dev->dev_addr, NULL);
+}
+
+
+void arp_send(int type, int ptype, __be32 dest_ip,
+		struct net_device *dev, __be32 src_ip,
+		const unsigned char *dest_hw, const unsigned char *src_hw,
+		const unsigned char *target_hw)
+{
+	struct sk_buff *skb;
+	/*
+	* No arp on this interface.
+	*/
+
+	if (dev->flags&IFF_NOARP)
+		return;
+	skb = arp_create(type, ptype, dest_ip, dev, src_ip,
+			 dest_hw, src_hw, target_hw);
+	if (skb == NULL)
+		return;
+	arp_xmit(skb);
+}
+
+static int arp_rcv(struct sk_buff *skb, struct net_device *dev,
+		   struct packet_type *pt, struct net_device *orig_dev)
+{
+	const struct arphdr *arp;
+	if (dev->flags & IFF_NOARP ||
+		skb->pkt_type == PACKET_OTHERHOST ||
+		skb->pkt_type == PACKET_LOOPBACK)
+		goto freeskb;
+	skb = skb_share_check(skb, GFP_ATOMIC);
+	if (!skb)
+		goto out_of_mem;
+	/* ARP header, plus 2 device addresses, plus 2 IP addresses. */
+	if (!pskb_may_pull(skb, arp_hdr_len(dev)))
+		goto freeskb;
+	arp = arp_hdr(skb);	
+	
+	if (arp->ar_hln != dev->addr_len || arp->ar_pln != 4)
+		goto freeskb;
+	memset(NEIGH_CB(skb), 0, sizeof(struct neighbour_cb));
+	return NF_HOOK(NFPROTO_ARP, NF_ARP_IN, skb, dev, NULL, arp_process);
+freeskb:
+	kfree_skb(skb);
+out_of_mem:
+	return 0;
+}
+
+
+
+static int arp_process(struct sk_buff *skb)
+{
+	struct net_device *dev = skb->dev;
+	struct in_device *in_dev = __in_dev_get_rcu(dev);
+	struct arphdr *arp;
+	unsigned char *arp_ptr;
+	struct rtable *rt;
+	unsigned char *sha;
+	_be32 sip, tip;
+	u16 dev_type = dev->type;
+	int addr_type;
+	struct neighbour *n;
+	struct net *net = dev_net(dev);
+	/* arp_rcv below verifies the ARP header and verifies the device
+	* is ARP'able.
+	*/
+	if (in_dev == NULL)
+		goto out;
+	arp = arp_hdr(skb);
+	switch (dev_type) {
+	default:
+		if (arp->ar_pro != htons(ETH_P_IP) ||
+			htons(dev_type) != arp->ar_hrd)
+		goto out;
+		break;
+	case ARPHRD_ETHER:
+		. . .
+		if ((arp->ar_hrd != htons(ARPHRD_ETHER) &&
+			arp->ar_hrd != htons(ARPHRD_IEEE802)) ||
+			arp->ar_pro != htons(ETH_P_IP))
+		goto out;
+		break;
+		. . .	
+		/* Understand only these message types */
+		if (arp->ar_op != htons(ARPOP_REPLY) &&
+			arp->ar_op != htons(ARPOP_REQUEST))
+		goto out;
+		/*
+		* Extract fields
+		*/
+		arp_ptr = (unsigned char *)(arp + 1);		
+		sha = arp_ptr;
+		arp_ptr += dev->addr_len;
+		
+		memcpy(&sip, arp_ptr, 4);
+		arp_ptr += 4;
+		switch (dev_type) {
+			. . .
+		default:
+			arp_ptr += dev->addr_len;
+		}
+		memcpy(&tip, arp_ptr, 4);
+		
+		/*
+		* Check for bad requests for 127.x.x.x and requests for multicast
+		* addresses. If this is one such, delete it.
+		*/
+		if (ipv4_is_multicast(tip) ||
+			(!IN_DEV_ROUTE_LOCALNET(in_dev) && ipv4_is_loopback(tip)))
+		goto out;
+		. . .
+         /* Special case: IPv4 duplicate address detection packet (RFC2131) */
+         if (sip == 0) {
+                 if (arp->ar_op == htons(ARPOP_REQUEST) &&
+                     inet_addr_type(net, tip) == RTN_LOCAL &&
+                     !arp_ignore(in_dev, sip, tip))
+                         arp_send(ARPOP_REPLY, ETH_P_ARP, sip, dev, tip, sha,
+                                  dev->dev_addr, sha);
+                 goto out;
+         }
+ 
+         if (arp->ar_op == htons(ARPOP_REQUEST) &&
+             ip_route_input_noref(skb, tip, sip, 0, dev) == 0) {
+ 
+                 rt = skb_rtable(skb);
+                 addr_type = rt->rt_type;
+ 
+                 if (addr_type == RTN_LOCAL) {
+                         int dont_send;
+ 
+                         dont_send = arp_ignore(in_dev, sip, tip);
+                         if (!dont_send && IN_DEV_ARPFILTER(in_dev))
+                                 dont_send = arp_filter(sip, tip, dev);
+                         if (!dont_send) {
+                                 n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
+                                 if (n) {
+                                         arp_send(ARPOP_REPLY, ETH_P_ARP, sip,
+                                                  dev, tip, sha, dev->dev_addr,
+                                                  sha);
+                                         neigh_release(n);
+                                 }
+                         }
+                         goto out;
+                 } else if (IN_DEV_FORWARD(in_dev)) {
+                         if (addr_type == RTN_UNICAST  &&
+                             (arp_fwd_proxy(in_dev, dev, rt) ||
+                              arp_fwd_pvlan(in_dev, dev, rt, sip, tip) ||
+                              (rt->dst.dev != dev &&
+                               pneigh_lookup(&arp_tbl, net, &tip, dev, 0)))) {
+                                 n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
+                                 if (n)
+                                         neigh_release(n);
+ 
+                                 if (NEIGH_CB(skb)->flags & LOCALLY_ENQUEUED ||
+                                     skb->pkt_type == PACKET_HOST ||
+                                     in_dev->arp_parms->proxy_delay == 0) {
+                                         arp_send(ARPOP_REPLY, ETH_P_ARP, sip,
+                                                  dev, tip, sha, dev->dev_addr,
+                                                  sha);
+                                 } else {
+                                         pneigh_enqueue(&arp_tbl,
+                                                        in_dev->arp_parms, skb);
+                                         return 0;
+                                 }
+                                 goto out;
+                         }
+                 }
+         }
+ 
+         /* Update our ARP tables */
+ 
+         n = __neigh_lookup(&arp_tbl, &sip, dev, 0);
+ 
+         if (IN_DEV_ARP_ACCEPT(in_dev)) {
+                 /* Unsolicited ARP is not accepted by default.
+                    It is possible, that this option should be enabled for some
+                    devices (strip is candidate)
+                  */
+                 if (n == NULL &&
+                     (arp->ar_op == htons(ARPOP_REPLY) ||
+                      (arp->ar_op == htons(ARPOP_REQUEST) && tip == sip)) &&
+                     inet_addr_type(net, sip) == RTN_UNICAST)
+                         n = __neigh_lookup(&arp_tbl, &sip, dev, 1);
+         }
+ 
+         if (n) {
+                 int state = NUD_REACHABLE;
+                 int override;
+ 
+                 /* If several different ARP replies follows back-to-back,
+                    use the FIRST one. It is possible, if several proxy
+                    agents are active. Taking the first reply prevents
+                    arp trashing and chooses the fastest router.
+                  */
+                 override = time_after(jiffies, n->updated + n->parms->locktime);
+ 
+                 /* Broadcast replies and request packets
+                    do not assert neighbour reachability.
+                  */
+                 if (arp->ar_op != htons(ARPOP_REPLY) ||
+                     skb->pkt_type != PACKET_HOST)
+                         state = NUD_STALE;
+                 neigh_update(n, sha, state,
+                              override ? NEIGH_UPDATE_F_OVERRIDE : 0);
+                 neigh_release(n);
+         }
+ 
+ out:
+         consume_skb(skb);
+         return 0;
+ }
+
+struct neigh_table nd_tbl = {
+	.family = AF_INET6,
+	.key_len = sizeof(struct in6_addr),
+	.hash = ndisc_hash,
+	.constructor = ndisc_constructor,
+	.pconstructor = pndisc_constructor,
+	.pdestructor = pndisc_destructor,
+	.proxy_redo = pndisc_redo,
+	.id = "ndisc_cache",
+	.parms = {
+		.tbl = &nd_tbl,
+		.base_reachable_time = ND_REACHABLE_TIME,
+		.retrans_time = ND_RETRANS_TIMER,
+		.gc_staletime = 60 * HZ,
+		.reachable_time = ND_REACHABLE_TIME,
+		.delay_probe_time = 5 * HZ,
+		.queue_len_bytes = 64*1024,
+		.ucast_probes = 3,
+		.mcast_probes = 3,
+		.anycast_delay = 1 * HZ,
+		.proxy_delay = (8 * HZ) / 10,
+		.proxy_qlen = 64,
+	},
+	.gc_interval = 30 * HZ,
+	.gc_thresh1 = 128,
+	.gc_thresh2 = 512,
+	.gc_thresh3 = 1024,
+};
+(net/ipv6/ndisc.c)
+
+#define NDISC_ROUTER_SOLICITATION 133
+#define NDISC_ROUTER_ADVERTISEMENT 134
+#define NDISC_NEIGHBOUR_SOLICITATION 135
+#define NDISC_NEIGHBOUR_ADVERTISEMENT 136
+#define NDISC_REDIRECT 137
+(include/net/ndisc.h)
+
+static int ip6_finish_output2(struct sk_buff *skb)
+{
+	struct dst_entry *dst = skb_dst(skb);
+	struct net_device *dev = dst->dev;
+	struct neighbour *neigh;
+	struct in6_addr *nexthop;
+	int ret;
+	. . .
+	. . .
+	nexthop = rt6_nexthop((struct rt6_info *)dst, &ipv6_hdr(skb)->daddr);
+	neigh = __ipv6_neigh_lookup_noref(dst->dev, nexthop);
+	if (unlikely(!neigh))
+		neigh = __neigh_create(&nd_tbl, nexthop, dst->dev, false);
+	if (!IS_ERR(neigh)) {
+		ret = dst_neigh_output(dst, neigh, skb);
+
+static void ndisc_solicit(struct neighbour *neigh, struct sk_buff *skb)
+{
+	struct in6_addr *saddr = NULL;
+	struct in6_addr mcaddr;
+
+	struct net_device *dev = neigh->dev;
+	struct in6_addr *target = (struct in6_addr *)&neigh->primary_key;
+	int probes = atomic_read(&neigh->probes);
+	if (skb && ipv6_chk_addr(dev_net(dev), &ipv6_hdr(skb)->saddr, dev, 1))
+		saddr = &ipv6_hdr(skb)->saddr;
+	if ((probes -= neigh->parms->ucast_probes) < 0) {
+		if (!(neigh->nud_state & NUD_VALID)) {
+			ND_PRINTK(1, dbg,
+				"%s: trying to ucast probe in NUD_INVALID: %pI6\n",
+				_func__, target);
+		}
+		ndisc_send_ns(dev, neigh, target, target, saddr);
+	} else if ((probes -= neigh->parms->app_probes) < 0) {
+#ifdef CONFIG_ARPD
+	neigh_app_ns(neigh);
+#endif
+	} else {
+		addrconf_addr_solict_mult(target, &mcaddr);
+		ndisc_send_ns(dev, NULL, target, &mcaddr, saddr);
+	}
+}
+
+struct nd_msg {
+	struct icmp6hdr icmph;
+	struct in6_addr target;
+	_u8 opt[0];
+};
+
+(include/net/ndisc.h)
+
+struct icmp6hdr {
+	_u8 icmp6_type;
+	_u8 icmp6_code;
+	_sum16 icmp6_cksum;
+	union {
+		. . .
+		. . .
+		struct icmpv6_nd_advt {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+			_u32 reserved:5,
+			override:1,
+			solicited:1,
+			router:1,
+			reserved2:24;
+		. . .
+#endif
+		} u_nd_advt;
+	} icmp6_dataun;
+. . .
+#define icmp6_router icmp6_dataun.u_nd_advt.router
+#define icmp6_solicited icmp6_dataun.u_nd_advt.solicited
+#define icmp6_override icmp6_dataun.u_nd_advt.override		
+. . .
+(include/uapi/linux/icmpv6.h)
+
+
+void ndisc_send_ns(struct net_device *dev, struct neighbour *neigh,
+			const struct in6_addr *solicit,
+			const struct in6_addr *daddr, const struct in6_addr *saddr)
+{
+	struct sk_buff *skb;
+	struct in6_addr addr_buf;
+	int inc_opt = dev->addr_len;
+	int optlen = 0;
+	struct nd_msg *msg;
+	if (saddr == NULL) {
+		if (ipv6_get_lladdr(dev, &addr_buf,
+			(IFA_F_TENTATIVE|IFA_F_OPTIMISTIC)))
+		return;
+		saddr = &addr_buf;
+	}
+	if (ipv6_addr_any(saddr))
+		inc_opt = 0;
+	if (inc_opt)
+		optlen += ndisc_opt_addr_space(dev);
+	skb = ndisc_alloc_skb(dev, sizeof(*msg) + optlen);
+	if (!skb)
+		return;
+	msg = (struct nd_msg *)skb_put(skb, sizeof(*msg));
+	*msg = (struct nd_msg) {
+		.icmph = {
+			.icmp6_type = NDISC_NEIGHBOUR_SOLICITATION,
+		},
+		.target = *solicit,
+	};
+	if (inc_opt)
+		ndisc_fill_addr_option(skb, ND_OPT_SOURCE_LL_ADDR,
+					dev->dev_addr);
+	ndisc_send_skb(skb, daddr, saddr);
+}
+static void ndisc_send_na(struct net_device *dev, struct neighbour *neigh,
+				const struct in6_addr *daddr,
+				const struct in6_addr *solicited_addr,
+				bool router, bool solicited, bool override, bool inc_opt)
+{
+	struct sk_buff *skb;
+	struct in6_addr tmpaddr;
+	struct inet6_ifaddr *ifp;
+	const struct in6_addr *src_addr;
+	struct nd_msg *msg;
+	int optlen = 0;
+	. . .
+	skb = ndisc_alloc_skb(dev, sizeof(*msg) + optlen);
+	if (!skb)
+		return;
+	msg = (struct nd_msg *)skb_put(skb, sizeof(*msg));
+	
+	*msg = (struct nd_msg) {
+		.icmph = {
+			.icmp6_type = NDISC_NEIGHBOUR_ADVERTISEMENT,
+			.icmp6_router = router,
+			.icmp6_solicited = solicited,
+			.icmp6_override = override,
+		},
+		.target = *solicited_addr,
+	};
+	if (inc_opt)
+		ndisc_fill_addr_option(skb, ND_OPT_TARGET_LL_ADDR,
+					dev->dev_addr);
+	ndisc_send_skb(skb, daddr, src_addr);
+}
+
+
+int ndisc_rcv(struct sk_buff *skb)
+{
+	struct nd_msg *msg;
+	if (skb_linearize(skb))
+		return 0;
+	msg = (struct nd_msg *)skb_transport_header(skb);
+	_skb_push(skb, skb->data - skb_transport_header(skb));
+	
+	if (ipv6_hdr(skb)->hop_limit != 255) {
+		ND_PRINTK(2, warn, "NDISC: invalid hop-limit: %d\n",
+			ipv6_hdr(skb)->hop_limit);
+		return 0;
+	}
+	if (msg->icmph.icmp6_code != 0) {
+		ND_PRINTK(2, warn, "NDISC: invalid ICMPv6 code: %d\n",
+			msg->icmph.icmp6_code);
+		return 0;
+	}
+	memset(NEIGH_CB(skb), 0, sizeof(struct neighbour_cb));
+	switch (msg->icmph.icmp6_type) {
+	case NDISC_NEIGHBOUR_SOLICITATION:
+		ndisc_recv_ns(skb);
+		break;
+	case NDISC_NEIGHBOUR_ADVERTISEMENT:
+		ndisc_recv_na(skb);
+		break;
+	case NDISC_ROUTER_SOLICITATION:
+		ndisc_recv_rs(skb);
+		break;
+	case NDISC_ROUTER_ADVERTISEMENT:
+		ndisc_router_discovery(skb);
+		break;
+	case NDISC_REDIRECT:
+		ndisc_redirect_rcv(skb);
+		break;
+	}
+	return 0;
+}
+
+static void ndisc_recv_ns(struct sk_buff *skb)
+{
+        struct nd_msg *msg = (struct nd_msg *)skb_transport_header(skb);
+        const struct in6_addr *saddr = &ipv6_hdr(skb)->saddr;
+        const struct in6_addr *daddr = &ipv6_hdr(skb)->daddr;
+        u8 *lladdr = NULL;
+        u32 ndoptlen = skb->tail - (skb->transport_header +
+                                    offsetof(struct nd_msg, opt));
+        struct ndisc_options ndopts;
+        struct net_device *dev = skb->dev;
+        struct inet6_ifaddr *ifp;
+        struct inet6_dev *idev = NULL;
+        struct neighbour *neigh;
+        int dad = ipv6_addr_any(saddr);
+        bool inc;
+        int is_router = -1;
+
+        if (skb->len < sizeof(struct nd_msg)) {
+                ND_PRINTK(2, warn, "NS: packet too short\n");
+                return;
+        }
+
+        if (ipv6_addr_is_multicast(&msg->target)) {
+                ND_PRINTK(2, warn, "NS: multicast target address\n");
+                return;
+        }
+
+        /*
+         * RFC2461 7.1.1:
+         * DAD has to be destined for solicited node multicast address.
+         */
+        if (dad && !ipv6_addr_is_solict_mult(daddr)) {
+                ND_PRINTK(2, warn, "NS: bad DAD packet (wrong destination)\n");
+                return;
+        }
+
+        if (!ndisc_parse_options(msg->opt, ndoptlen, &ndopts)) {
+                ND_PRINTK(2, warn, "NS: invalid ND options\n");
+                return;
+        }
+
+        if (ndopts.nd_opts_src_lladdr) {
+                lladdr = ndisc_opt_addr_data(ndopts.nd_opts_src_lladdr, dev);
+                if (!lladdr) {
+                        ND_PRINTK(2, warn,
+                                  "NS: invalid link-layer address length\n");
+                        return;
+                }
+
+                /* RFC2461 7.1.1:
+                 *      If the IP source address is the unspecified address,
+                 *      there MUST NOT be source link-layer address option
+                 *      in the message.
+                 */
+                if (dad) {
+                        ND_PRINTK(2, warn,
+                                  "NS: bad DAD packet (link-layer address option)\n");
+                        return;
+                }
+        }
+
+        inc = ipv6_addr_is_multicast(daddr);
+
+        ifp = ipv6_get_ifaddr(dev_net(dev), &msg->target, dev, 1);
+        if (ifp) {
+
+                if (ifp->flags & (IFA_F_TENTATIVE|IFA_F_OPTIMISTIC)) {
+                        if (dad) {
+                                /*
+                                 * We are colliding with another node
+                                 * who is doing DAD
+                                 * so fail our DAD process
+                                 */
+                                addrconf_dad_failure(ifp);
+                                return;
+                        } else {
+                                /*
+                                 * This is not a dad solicitation.
+                                 * If we are an optimistic node,
+                                 * we should respond.
+                                 * Otherwise, we should ignore it.
+                                 */
+                                if (!(ifp->flags & IFA_F_OPTIMISTIC))
+                                        goto out;
+                        }
+                }
+
+                idev = ifp->idev;
+        } else {
+                struct net *net = dev_net(dev);
+
+                idev = in6_dev_get(dev);
+                if (!idev) {
+                        /* XXX: count this drop? */
+                        return;
+                }
+
+                if (ipv6_chk_acast_addr(net, dev, &msg->target) ||
+                    (idev->cnf.forwarding &&
+                     (net->ipv6.devconf_all->proxy_ndp || idev->cnf.proxy_ndp) &&
+                     (is_router = pndisc_is_router(&msg->target, dev)) >= 0)) {
+                        if (!(NEIGH_CB(skb)->flags & LOCALLY_ENQUEUED) &&
+                            skb->pkt_type != PACKET_HOST &&
+                            inc != 0 &&
+                            idev->nd_parms->proxy_delay != 0) {
+                                /*
+                                 * for anycast or proxy,
+                                 * sender should delay its response
+                                 * by a random time between 0 and
+                                 * MAX_ANYCAST_DELAY_TIME seconds.
+                                 * (RFC2461) -- yoshfuji
+                                 */
+                                struct sk_buff *n = skb_clone(skb, GFP_ATOMIC);
+                                if (n)
+                                        pneigh_enqueue(&nd_tbl, idev->nd_parms, n);
+                                goto out;
+                        }
+                } else
+                        goto out;
+        }
+
+        if (is_router < 0)
+                is_router = idev->cnf.forwarding;
+
+        if (dad) {
+                ndisc_send_na(dev, NULL, &in6addr_linklocal_allnodes, &msg->target,
+                              !!is_router, false, (ifp != NULL), true);
+                goto out;
+        }
+
+        if (inc)
+                NEIGH_CACHE_STAT_INC(&nd_tbl, rcv_probes_mcast);
+        else
+                NEIGH_CACHE_STAT_INC(&nd_tbl, rcv_probes_ucast);
+
+        /*
+         *      update / create cache entry
+         *      for the source address
+         */
+        neigh = __neigh_lookup(&nd_tbl, saddr, dev,
+                               !inc || lladdr || !dev->addr_len);
+        if (neigh)
+                neigh_update(neigh, lladdr, NUD_STALE,
+                             NEIGH_UPDATE_F_WEAK_OVERRIDE|
+                             NEIGH_UPDATE_F_OVERRIDE);
+        if (neigh || !dev->header_ops) {
+                ndisc_send_na(dev, neigh, saddr, &msg->target,
+                              !!is_router,
+                              true, (ifp != NULL && inc), inc);
+                if (neigh)
+                        neigh_release(neigh);
+        }
+
+out:
+        if (ifp)
+                in6_ifa_put(ifp);
+        else
+                in6_dev_put(idev);
+}
+
+static void ndisc_recv_na(struct sk_buff *skb)
+{
+        struct nd_msg *msg = (struct nd_msg *)skb_transport_header(skb);
+        const struct in6_addr *saddr = &ipv6_hdr(skb)->saddr;
+        const struct in6_addr *daddr = &ipv6_hdr(skb)->daddr;
+        u8 *lladdr = NULL;
+        u32 ndoptlen = skb->tail - (skb->transport_header +
+                                    offsetof(struct nd_msg, opt));
+        struct ndisc_options ndopts;
+        struct net_device *dev = skb->dev;
+        struct inet6_ifaddr *ifp;
+        struct neighbour *neigh;
+
+        if (skb->len < sizeof(struct nd_msg)) {
+                ND_PRINTK(2, warn, "NA: packet too short\n");
+                return;
+        }
+
+        if (ipv6_addr_is_multicast(&msg->target)) {
+                ND_PRINTK(2, warn, "NA: target address is multicast\n");
+                return;
+        }
+
+        if (ipv6_addr_is_multicast(daddr) &&
+            msg->icmph.icmp6_solicited) {
+                ND_PRINTK(2, warn, "NA: solicited NA is multicasted\n");
+                return;
+        }
+
+        if (!ndisc_parse_options(msg->opt, ndoptlen, &ndopts)) {
+                ND_PRINTK(2, warn, "NS: invalid ND option\n");
+                return;
+        }
+        if (ndopts.nd_opts_tgt_lladdr) {
+                lladdr = ndisc_opt_addr_data(ndopts.nd_opts_tgt_lladdr, dev);
+                if (!lladdr) {
+                        ND_PRINTK(2, warn,
+                                  "NA: invalid link-layer address length\n");
+                        return;
+                }
+        }
+        ifp = ipv6_get_ifaddr(dev_net(dev), &msg->target, dev, 1);
+        if (ifp) {
+                if (skb->pkt_type != PACKET_LOOPBACK
+                    && (ifp->flags & IFA_F_TENTATIVE)) {
+                                addrconf_dad_failure(ifp);
+                                return;
+                }
+                /* What should we make now? The advertisement
+                   is invalid, but ndisc specs say nothing
+                   about it. It could be misconfiguration, or
+                   an smart proxy agent tries to help us :-)
+
+                   We should not print the error if NA has been
+                   received from loopback - it is just our own
+                   unsolicited advertisement.
+                 */
+                if (skb->pkt_type != PACKET_LOOPBACK)
+                        ND_PRINTK(1, warn,
+                                  "NA: someone advertises our address %pI6 on %s!\n",
+                                  &ifp->addr, ifp->idev->dev->name);
+                in6_ifa_put(ifp);
+                return;
+        }
+        neigh = neigh_lookup(&nd_tbl, &msg->target, dev);
+
+        if (neigh) {
+                u8 old_flags = neigh->flags;
+                struct net *net = dev_net(dev);
+
+                if (neigh->nud_state & NUD_FAILED)
+                        goto out;
+
+                /*
+                 * Don't update the neighbor cache entry on a proxy NA from
+                 * ourselves because either the proxied node is off link or it
+                 * has already sent a NA to us.
+                 */
+                if (lladdr && !memcmp(lladdr, dev->dev_addr, dev->addr_len) &&
+                    net->ipv6.devconf_all->forwarding && net->ipv6.devconf_all->proxy_ndp &&
+                    pneigh_lookup(&nd_tbl, net, &msg->target, dev, 0)) {
+                        /* XXX: idev->cnf.proxy_ndp */
+                        goto out;
+                }
+
+                neigh_update(neigh, lladdr,
+                             msg->icmph.icmp6_solicited ? NUD_REACHABLE : NUD_STALE,
+                             NEIGH_UPDATE_F_WEAK_OVERRIDE|
+                             (msg->icmph.icmp6_override ? NEIGH_UPDATE_F_OVERRIDE : 0)|
+                             NEIGH_UPDATE_F_OVERRIDE_ISROUTER|
+                             (msg->icmph.icmp6_router ? NEIGH_UPDATE_F_ISROUTER : 0));
+
+                if ((old_flags & ~neigh->flags) & NTF_ROUTER) {
+                        /*
+                         * Change: router to host
+                         */
+                        struct rt6_info *rt;
+                        rt = rt6_get_dflt_router(saddr, dev);
+                        if (rt)
+                                ip6_del_rt(rt);
+                }
+
+out:
+                neigh_release(neigh);
+        }
+}
+
+

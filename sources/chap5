@@ -1,0 +1,328 @@
+chapter 5
+----------
+
+struct dst_entry {
+	...
+	int (*input)(struct sk_buff *);
+	int (*output)(struct sk_buff *);
+	...
+}
+
+
+struct rtable {
+	struct dst_entry dst;
+	int rt_genid;
+	unsigned int rt_flags;
+	__u16 rt_type;
+	__u8 rt_is_input;
+	__u8 rt_uses_gateway;
+	int rt_iif;
+	/* Info on neighbour */
+	__be32 rt_gateway;
+	
+	/* Miscellaneous cached information */
+	u32 rt_pmtu;
+	struct list_head rt_uncached;
+	};
+	
+(include/net/route.h)
+
+struct fib_result {
+	unsigned char prefixlen;
+	unsigned char nh_sel;
+	unsigned char type;
+	unsigned char scope;
+	u32 tclassid;
+	struct fib_info *fi;
+	struct fib_table *table;
+	struct list_head *fa_head;
+};
+
+(include/net/ip_fib.h)
+
+struct fib_table {
+	struct hlist_node tb_hlist;
+	u32 tb_id;
+	int tb_default;
+	int tb_num_default;
+	unsigned long tb_data[0];
+};
+(include/net/ip_fib.h)
+
+struct fib_info {
+	struct hlist_node fib_hash;
+	struct hlist_node fib_lhash;
+	struct net *fib_net;
+	int fib_treeref;
+	atomic_t fib_clntref;
+	unsigned int fib_flags;
+	unsigned char fib_dead;
+	unsigned char fib_protocol;
+	unsigned char fib_scope;
+	unsigned char fib_type;
+	__be32 fib_prefsrc;
+	u32 fib_priority;
+	u32 *fib_metrics;
+#define fib_mtu fib_metrics[RTAX_MTU-1]
+#define fib_window fib_metrics[RTAX_WINDOW-1]
+#define fib_rtt fib_metrics[RTAX_RTT-1]
+#define fib_advmss fib_metrics[RTAX_ADVMSS-1]
+	int fib_nhs;
+#ifdef CONFIG_IP_ROUTE_MULTIPATH
+	int fib_power;
+#endif
+	struct rcu_head rcu;
+	struct fib_nh fib_nh[0];
+#define fib_dev fib_nh[0].nh_dev
+};
+
+(include/net/ip_fib.h)
+
+
+
+struct fib_prop {
+	int error;
+	u8 scope;
+};
+
+(net/ipv4/fib_lookup.h)
+
+
+const struct fib_prop fib_props[RTN_MAX + 1] = {
+. . .
+	[RTN_PROHIBIT] = {
+		.error = -EACCES,
+		.scope = RT_SCOPE_UNIVERSE,
+	},
+. . .
+
+
+static int check_leaf(struct fib_table *tb, struct trie *t, struct leaf *l,
+		      t_key key, const struct flowi4 *flp,
+                      struct fib_result *res, int fib_flags)
+{
+	. . .
+	fib_alias_accessed(fa);
+	err = fib_props[fa->fa_type].error;
+	if (err) {
+		. . .
+		return err;
+}
+
+
+struct fib_nh {
+	struct net_device *nh_dev;
+	struct hlist_node nh_hash;
+	struct fib_info *nh_parent;
+	unsigned int nh_flags;
+	unsigned char nh_scope;
+#ifdef CONFIG_IP_ROUTE_MULTIPATH
+	int nh_weight;
+	int nh_power;
+#endif
+#ifdef CONFIG_IP_ROUTE_CLASSID
+	__u32 nh_tclassid;
+#endif
+	int nh_oif;
+	__be32 nh_gw;
+	__be32 nh_saddr;
+	int nh_saddr_genid;
+	struct rtable __rcu * __percpu *nh_pcpu_rth_output;
+	struct rtable __rcu *nh_rth_input;
+	struct fnhe_hash_bucket *nh_exceptions;
+};
+
+(include/net/ip_fib.h)
+
+struct fib_nh_exception {
+	struct fib_nh_exception __rcu *fnhe_next;
+	__be32 fnhe_daddr;
+	u32 fnhe_pmtu;
+	__be32 fnhe_gw;
+	unsigned long fnhe_expires;
+	struct rtable __rcu *fnhe_rth;
+	unsigned long fnhe_stamp;
+};
+
+(include/net/ip_fib.h)
+
+static void __ip_do_redirect(struct rtable *rt, struct sk_buff *skb, struct flowi4 *fl4,
+			     bool kill_route)
+{
+	...
+	__be32 new_gw = icmp_hdr(skb)->un.gateway;
+	...
+	update_or_create_fnhe(nh, fl4->daddr, new_gw, 0, 0);
+	...
+}
+
+static void __ip_rt_update_pmtu(struct rtable *rt, struct flowi4 *fl4, u32 mtu)
+{
+	. . .
+	if (fib_lookup(dev_net(dst->dev), fl4, &res) == 0) {
+		struct fib_nh *nh = &FIB_RES_NH(res);
+		update_or_create_fnhe(nh, fl4->daddr, 0, mtu,
+			jiffies + ip_rt_mtu_expires);
+	}
+	. . .
+}
+
+
+struct fib_alias {
+	struct list_head fa_list;
+	struct fib_info *fa_info;
+	u8 fa_tos;
+	u8 fa_type;
+	u8 fa_state;
+	struct rcu_head rcu;
+};
+
+(net/ipv4/fib_lookup.h)
+
+
+int fib_table_insert(struct fib_table *tb, struct fib_config *cfg)
+{
+	struct trie *t = (struct trie *) tb->tb_data;
+	struct fib_alias *fa, *new_fa;
+	struct list_head *fa_head = NULL;
+	struct fib_info *fi;
+	. . .
+	fi = fib_create_info(cfg);
+	
+	
+struct fib_info *fib_create_info(struct fib_config *cfg)
+{
+	struct fib_info *fi = NULL;
+	struct fib_info *ofi;
+	. . .
+	fi = kzalloc(sizeof(*fi)+nhs*sizeof(struct fib_nh), GFP_KERNEL);
+	if (fi == NULL)
+		goto failure;
+	. . .
+link_it:
+	ofi = fib_find_info(fi);
+	
+	if (ofi) {
+		fi->fib_dead = 1;
+		free_fib_info(fi);
+		ofi->fib_treeref++;
+		return ofi;
+	}
+. . .
+}	
+
+fib_table_insert() - continued:
+
+	l = fib_find_node(t, key);
+	fa = NULL;
+	if (l) {
+		fa_head = get_fa_head(l, plen);
+		fa = fib_find_alias(fa_head, tos, fi->fib_priority);
+	}
+	if (fa && fa->fa_tos == tos &&
+		fa->fa_info->fib_priority == fi->fib_priority) {
+	. . .
+	}
+	new_fa = kmem_cache_alloc(fn_alias_kmem, GFP_KERNEL);
+	if (new_fa == NULL)
+		goto out;
+	new_fa->fa_info = fi;
+	. . .
+
+static int __mkroute_input(struct sk_buff *skb,
+			   const struct fib_result *res,
+			   struct in_device *in_dev,
+			   __be32 daddr, __be32 saddr, u32 tos)
+{
+	struct rtable *rth;
+	int err;
+	struct in_device *out_dev;
+	unsigned int flags = 0;
+	bool do_cache;
+
+	if (out_dev == in_dev && err && IN_DEV_TX_REDIRECTS(out_dev) &&
+		(IN_DEV_SHARED_MEDIA(out_dev) ||
+			inet_addr_onlink(out_dev, saddr, FIB_RES_GW(*res)))) {
+		flags |= RTCF_DOREDIRECT;
+		do_cache = false;
+	}
+	. . .
+	rth->rt_flags = flags;
+	. . .
+}	
+
+
+int ip_forward(struct sk_buff *skb)
+{
+	struct iphdr *iph; /* Our header */
+	struct rtable *rt; /* Route we use */
+	struct ip_options *opt = &(IPCB(skb)->opt);
+	
+	if (rt->rt_flags&RTCF_DOREDIRECT && !opt->srr && !skb_sec_path(skb))
+		ip_rt_send_redirect(skb);
+
+	
+void ip_rt_send_redirect(struct sk_buff *skb)
+{
+	. . .
+	icmp_send(skb, ICMP_REDIRECT, ICMP_REDIR_HOST,
+		rt_nexthop(rt, ip_hdr(skb)->daddr))
+	. . .
+}
+(net/ipv4/route.c)
+
+
+static void __ip_do_redirect(struct rtable *rt, struct sk_buff *skb, 
+			     struct flowi4 *fl4,bool kill_route)
+			    
+{
+	__be32 new_gw = icmp_hdr(skb)->un.gateway;
+	__be32 old_gw = ip_hdr(skb)->saddr;
+	struct net_device *dev = skb->dev;
+	struct in_device *in_dev;
+	struct fib_result res;
+	struct neighbour *n;
+	struct net *net;
+	. . .
+	if (rt->rt_gateway != old_gw)
+		return;
+	in_dev = __in_dev_get_rcu(dev);
+	if (!in_dev)
+		return;
+	net = dev_net(dev);
+	if (new_gw == old_gw || !IN_DEV_RX_REDIRECTS(in_dev) ||
+		ipv4_is_multicast(new_gw) || ipv4_is_lbcast(new_gw) ||
+		ipv4_is_zeronet(new_gw))
+		goto reject_redirect;
+		if (!IN_DEV_SHARED_MEDIA(in_dev)) {
+			if (!inet_addr_onlink(in_dev, new_gw, old_gw))
+				goto reject_redirect;
+			if (IN_DEV_SEC_REDIRECTS(in_dev) && ip_fib_check_default(new_gw, dev))
+				goto reject_redirect;
+		} else {
+			if (inet_addr_type(net, new_gw) != RTN_UNICAST)
+				goto reject_redirect;
+		}
+		
+	n = ipv4_neigh_lookup(&rt->dst, NULL, &new_gw);
+	if (n) {
+		if (!(n->nud_state & NUD_VALID)) {
+			neigh_event_send(n, NULL);
+		} else {
+			if (fib_lookup(net, fl4, &res) == 0) {
+				struct fib_nh *nh = &FIB_RES_NH(res);
+				update_or_create_fnhe(nh, fl4->daddr, new_gw,
+					0, 0);
+			}
+			if (kill_route)
+				rt->dst.obsolete = DST_OBSOLETE_KILL;
+			call_netevent_notifiers(NETEVENT_NEIGH_UPDATE, n);
+		}
+		neigh_release(n);
+	}
+return;
+reject_redirect:
+. . .
+(net/ipv4/route.c)	
+	
+	

@@ -1,0 +1,203 @@
+chapter 2
+----------
+struct sockaddr_nl {
+	_kernel_sa_family_t nl_family; /* AF_NETLINK */
+	unsigned short nl_pad; /* zero */
+	_u32 nl_pid; /* port ID */
+	_u32 nl_groups; /* multicast groups mask */
+};
+(include/uapi/linux/netlink.h)
+
+static int __net_init rtnetlink_net_init(struct net *net) {
+	...
+	struct netlink_kernel_cfg cfg = {
+		.groups = RTNLGRP_MAX,
+		.input = rtnetlink_rcv,
+		.cb_mutex = &rtnl_mutex,
+		.flags = NL_CFG_F_NONROOT_RECV,
+	};
+	
+	sk = netlink_kernel_create(net, NETLINK_ROUTE, &cfg);
+	...
+}
+struct netlink_kernel_cfg {
+	unsigned int groups;
+	unsigned int flags;
+	void (*input)(struct sk_buff *skb);
+	struct mutex *cb_mutex;
+	void (*bind)(int group);
+	};
+(include/uapi/linux/netlink.h)
+
+
+static int netlink_bind(struct socket *sock, struct sockaddr *addr,
+int addr_len)
+{
+	...
+	if (nladdr->nl_groups) {
+		if (!netlink_capable(sock, NL_CFG_F_NONROOT_RECV))
+			return -EPERM;
+	}
+	
+	
+static int uevent_net_init(struct net *net)
+{
+	struct uevent_sock *ue_sk;
+	struct netlink_kernel_cfg cfg = {
+		.groups = 1,
+		.flags = NL_CFG_F_NONROOT_RECV,
+	};
+	...
+	ue_sk->sk = netlink_kernel_create(net, NETLINK_KOBJECT_UEVENT, &cfg);
+	...
+}
+(lib/kobject_uevent.c)	
+
+extern void rtnl_register(int protocol, int msgtype,
+			rtnl_doit_func,
+			rtnl_dumpit_func,
+			rtnl_calcit_func);
+
+struct nlmsghdr
+{
+	_u32 nlmsg_len;
+	_u16 nlmsg_type;
+	_u16 nlmsg_flags;
+	_u32 nlmsg_seq;
+	_u32 nlmsg_pid;
+};
+(include/uapi/linux/netlink.h)
+
+struct nlattr {
+	_u16 nla_len;
+	_u16 nla_type;
+};
+(include/uapi/linux/netlink.h)
+
+struct nla_policy {
+	u16 type;
+	u16 len;
+};
+(include/uapi/linux/netlink.h)
+
+struct nlmsgerr {
+	int error;
+	struct nlmsghdr msg;
+};
+(include/uapi/linux/netlink.h)
+
+static int __net_init genl_pernet_init(struct net *net) {
+..
+struct netlink_kernel_cfg cfg = {
+	.input = genl_rcv,
+	.cb_mutex = &genl_mutex,
+	.flags = NL_CFG_F_NONROOT_RECV,
+	};
+	net->genl_sock = netlink_kernel_create(net, NETLINK_GENERIC, &cfg);
+	...
+}
+(net/netlink/genetlink.c)
+
+static struct genl_family genl_ctrl = {
+	.id = GENL_ID_CTRL,
+	.name = "nlctrl",
+	.version = 0x2,
+	.maxattr = CTRL_ATTR_MAX,
+	.netnsok = true,
+};
+
+static int __net_init genl_pernet_init(struct net *net) {
+	...
+	err = genl_register_family_with_ops(&genl_ctrl, &genl_ctrl_ops, 1)
+	...
+	
+static struct genl_multicast_group nfc_genl_event_mcgrp = {
+	.name = NFC_GENL_MCAST_EVENT_NAME,
+};
+int __init nfc_genl_init(void)
+{
+	...
+	rc = genl_register_mc_group(&nfc_genl_family, &nfc_genl_event_mcgrp);
+	...
+}
+(net/nfc/netlink.c)
+
+int nl80211_init(void)
+{
+	int err;
+	err = genl_register_family_with_ops(&nl80211_fam,
+		nl80211_ops, ARRAY_SIZE(nl80211_ops));
+	...
+}
+(net/wireless/nl80211.c)
+
+static struct genl_family nl80211_fam = {
+	.id = GENL_ID_GENERATE, /* don't bother with a hardcoded ID */
+	.name = "nl80211", /* have users key off the name instead */
+	.hdrsize = 0, /* no private header */
+	.version = 1, /* no particular meaning now */
+	.maxattr = NL80211_ATTR_MAX,
+	.netnsok = true,
+	.pre_doit = nl80211_pre_doit,
+	.post_doit = nl80211_post_doit,
+};
+
+struct genl_ops {
+	u8 cmd;
+	u8 internal_flags;
+	unsigned int flags;
+	const struct nla_policy *policy;
+	int (*doit)(struct sk_buff *skb,
+		struct genl_info *info);
+	int (*dumpit)(struct sk_buff *skb,
+		struct netlink_callback *cb);
+	int (*done)(struct netlink_callback *cb);
+	struct list_head ops_list;
+};
+
+static struct genl_ops nl80211_ops[] = {
+{
+	...
+	{
+		.cmd = NL80211_CMD_GET_SCAN,
+		.policy = nl80211_policy,
+		.dumpit = nl80211_dump_scan,
+	},
+	...
+}
+
+struct genlmsghdr {
+	_u8 cmd;
+	_u8 version;
+	_u16 reserved;
+};
+(include/uapi/linux/genetlink.h)
+
+static int __net_init diag_net_init(struct net *net)
+{
+	struct netlink_kernel_cfg cfg = {
+		.input = sock_diag_rcv,
+	};
+	net->diag_nlsk = netlink_kernel_create(net, NETLINK_SOCK_DIAG, &cfg);
+	return net->diag_nlsk == NULL ? -ENOMEM : 0;
+}
+(net/core/sock_diag.c)
+
+struct sock_diag_handler {
+	_u8 family;
+	int (*dump)(struct sk_buff *skb, struct nlmsghdr *nlh);
+};
+(net/core/sock_diag.c)
+
+static const struct sock_diag_handler unix_diag_handler = {
+	.family = AF_UNIX,
+	.dump = unix_diag_handler_dump,
+};
+
+static int __init unix_diag_init(void)
+{
+	return sock_diag_register(&unix_diag_handler);
+}
+
+
+

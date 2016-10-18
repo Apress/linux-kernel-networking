@@ -1,0 +1,228 @@
+chapter 13
+-----------
+static void my_add_one(struct ib_device *device)
+{
+	...
+}
+static void my_remove_one(struct ib_device *device)
+{
+	...
+}
+
+
+static struct ib_client my_client = {
+	.name = "my RDMA module",
+	.add = my_add_one,
+	.remove = my_remove_one
+};
+
+static int __init my_init_module(void)
+{
+	int ret;
+	ret = ib_register_client(&my_client);
+	if (ret) {
+		printk(KERN_ERR "Failed to register IB client\n");
+		return ret;
+	}
+
+	return 0;
+}
+
+static void __exit my_cleanup_module(void)
+{
+	ib_unregister_client(&my_client);
+}
+
+module_init(my_init_module);
+module_exit(my_cleanup_module);
+
+
+Here is an example of a code that empties a CQ—that is, 
+reads all the Work Completions from a CQ, and checks their status:
+
+struct ib_wc wc;
+int num_comp = 0;
+while (ib_poll_cq(cq, 1, &wc) > 0) {
+	if (wc.status != IB_WC_SUCCESS) {
+		printk(KERN_ERR "The Work Completion[%d] has a bad status %d\n",
+			num_comp, wc.status);
+		return -EINVAL;
+	}
+num_comp ++;
+}
+
+
+Here is an example for setting the value of the watermark to get an asynchronous 
+event when the number of RRs in the SRQ drops below 5:
+
+struct ib_srq_attr srq_attr;
+int ret;
+memset(&srq_attr, 0, sizeof(srq_attr));
+srq_attr.srq_limit = 5;
+ret = ib_modify_srq(srq, &srq_attr, IB_SRQ_LIMIT);
+if (ret) {
+	printk(KERN_ERR "Failed to set the SRQ's limit value\n");
+return ret;
+}
+
+Here is an example for posting a single Receive Request to an SRQ. It saves
+an incoming message in a memory buffer, using its registered DMA address in a 
+single gather entry:
+
+struct ib_recv_wr wr, *bad_wr;
+struct ib_sge sg;
+int ret;
+memset(&sg, 0, sizeof(sg));
+sg.addr = dma_addr;
+sg.length = len;
+sg.lkey = mr->lkey;
+memset(&wr, 0, sizeof(wr));
+wr.next = NULL;
+wr.wr_id = (uintptr_t)dma_addr;
+wr.sg_list = &sg;
+wr.num_sge = 1;
+ret = ib_post_srq_recv(srq, &wr, &bad_wr);
+if (ret) {
+	printk(KERN_ERR "Failed to post Receive Request to an SRQ\n");
+	return ret;
+}
+
+
+Here is an example for creating an RC QP using a PD that was created, with two
+different CQs: one for the Send Queue and one for the Receive Queue:
+
+struct ib_qp_init_attr init_attr;
+struct ib_qp *qp;
+memset(&init_attr, 0, sizeof(init_attr));
+init_attr.event_handler = my_qp_event;
+init_attr.cap.max_send_wr = 2;
+init_attr.cap.max_recv_wr = 2;
+init_attr.cap.max_recv_sge = 1;
+init_attr.cap.max_send_sge = 1;
+init_attr.sq_sig_type = IB_SIGNAL_ALL_WR;
+init_attr.qp_type = IB_QPT_RC;
+init_attr.send_cq = send_cq;
+init_attr.recv_cq = recv_cq;
+qp = ib_create_qp(pd, &init_attr);
+if (IS_ERR(qp)) {
+	printk(KERN_ERR "Failed to create a QP\n");
+	return PTR_ERR(qp);
+}
+
+
+
+Here is an example for modifying a newly created RC QP to the RTS state, in 
+which it can send and receive packets. The local attributes are the outgoing 
+port, the used SL, and the starting Packet Serial Number for the Send Queue. 
+The remote attibutes needed are the Receive PSN, the QP number, and the LID 
+of the port that it uses.
+
+struct ib_qp_attr attr = {
+	.qp_state = IB_QPS_INIT,
+	.pkey_index = 0,
+	.port_num = port,
+	.qp_access_flags = 0
+};
+
+ret = ib_modify_qp(qp, &attr,
+		   IB_QP_STATE |
+		   IB_QP_PKEY_INDEX |
+		   IB_QP_PORT |
+		   IB_QP_ACCESS_FLAGS);
+if (ret) {
+	printk(KERN_ERR "Failed to modify QP to INIT state\n");
+	return ret;
+}
+attr.qp_state = IB_QPS_RTR;
+attr.path_mtu = mtu;
+attr.dest_qp_num = remote->qpn;
+attr.rq_psn = remote->psn;
+attr.max_dest_rd_atomic = 1;
+attr.min_rnr_timer = 12;
+attr.ah_attr.is_global = 0;
+attr.ah_attr.dlid = remote->lid;
+attr.ah_attr.sl = sl;
+attr.ah_attr.src_path_bits = 0,
+attr.ah_attr.port_num = port
+ret = ib_modify_qp(ctx->qp, &attr,
+		   IB_QP_STATE |
+		   IB_QP_AV |
+		   IB_QP_PATH_MTU |
+		   IB_QP_DEST_QPN |
+		   IB_QP_RQ_PSN |
+		   IB_QP_MAX_DEST_RD_ATOMIC |
+		   IB_QP_MIN_RNR_TIMER);
+if (ret) {
+	printk(KERN_ERR "Failed to modify QP to RTR state\n");
+	return ret;
+}
+
+attr.qp_state = IB_QPS_RTS;
+attr.timeout = 14;
+attr.retry_cnt = 7;
+attr.rnr_retry = 6;
+attr.sq_psn = my_psn;
+attr.max_rd_atomic = 1;
+ret = ib_modify_qp(ctx->qp, &attr,
+	           IB_QP_STATE |
+	           IB_QP_TIMEOUT |
+	           IB_QP_RETRY_CNT |
+	           IB_QP_RNR_RETRY |
+	           IB_QP_SQ_PSN |
+	           IB_QP_MAX_QP_RD_ATOMIC);
+if (ret) {
+	printk(KERN_ERR "Failed to modify QP to RTS state\n");
+	return ret;
+}
+
+Here is an example for posting a single Receive Request for a QP. It saves an
+incoming message in a memory buffer using its registered DMA address in a 
+single gather entry. qp is a pointer to a QP that was created using
+ib_create_qp(). The memory buffer is a block that was allocated 
+using kmalloc() and mapped for DMA using ib_dma_map_single(). The used 
+lkey is from the MR that was registered using ib_get_dma_mr().
+
+struct ib_recv_wr wr, *bad_wr;
+struct ib_sge sg;
+int ret;
+memset(&sg, 0, sizeof(sg));
+sg.addr = dma_addr;
+sg.length = len;
+sg.lkey = mr->lkey;
+memset(&wr, 0, sizeof(wr));
+wr.next = NULL;
+wr.wr_id = (uintptr_t)dma_addr;
+wr.sg_list = &sg;
+wr.num_sge = 1;
+ret = ib_post_recv(qp, &wr, &bad_wr);
+if (ret) {
+	printk(KERN_ERR "Failed to post Receive Request to a QP\n");
+	return ret;
+}
+
+Here is an example for posting a single Send Request of a Send operation
+for a QP. It sends the content of a memory buffer using its registered DMA 
+address in a single gather entry.
+
+struct ib_sge sg;
+struct ib_send_wr wr, *bad_wr;
+int ret;
+memset(&sg, 0, sizeof(sg));
+sg.addr = dma_addr;
+sg.length = len;
+sg.lkey = mr->lkey;
+memset(&wr, 0, sizeof(wr));
+wr.next = NULL;
+wr.wr_id = (uintptr_t)dma_addr;
+wr.sg_list = &sg;
+wr.num_sge = 1;
+wr.opcode = IB_WR_SEND;
+wr.send_flags = IB_SEND_SIGNALED;
+ret = ib_post_send(qp, &wr, &bad_wr);
+
+if (ret) {
+	printk(KERN_ERR "Failed to post Send Request to a QP\n");
+	return ret;
+}
+
+

@@ -1,0 +1,77 @@
+chapter 12
+-----------
+
+struct ieee80211_hdr {
+	_le16 frame_control;
+	_le16 duration_id;
+	u8 addr1[6];
+	u8 addr2[6];
+	u8 addr3[6];
+	_le16 seq_ctrl;
+	u8 addr4[6];
+} __packed;
+
+(include/linux/ieee80211.h)
+
+
+ieee80211_rx_h_mgmt_check(struct ieee80211_rx_data *rx)
+{
+	struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *) rx->skb->data;
+	struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(rx->skb);
+	. . .
+	if (rx->skb->len < 24)
+		return RX_DROP_MONITOR;
+	if (!ieee80211_is_mgmt(mgmt->frame_control))
+		return RX_DROP_MONITOR;
+	. . .
+}
+(net/mac80211/rx.c)
+
+
+
+static bool ieee80211_tx(struct ieee80211_sub_if_data *sdata,
+				struct sk_buff *skb, bool txpending,
+				enum ieee80211_band band)
+{
+	struct ieee80211_local *local = sdata->local;
+	struct ieee80211_tx_data tx;
+	ieee80211_tx_result res_prepare;
+	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+	bool result = true;
+	int led_len;
+	
+	if (unlikely(skb->len < 10)) {
+		dev_kfree_skb(skb);
+		return true;
+	}
+	/* initialises tx */
+	led_len = skb->len;
+	
+	res_prepare = ieee80211_tx_prepare(sdata, &tx, skb);
+	
+	if (unlikely(res_prepare == TX_DROP)) {
+		ieee80211_free_txskb(&local->hw, skb);
+		return true;
+	} else if (unlikely(res_prepare == TX_QUEUED)) {
+		return true;
+	}
+	. . .
+	if (!invoke_tx_handlers(&tx))
+		result = __ieee80211_tx(local, &tx.skbs, led_len,
+					tx.sta, txpending);
+	return result;
+}
+	
+(net/mac80211/tx.c)
+
+struct ieee80211_bar {
+	_le16 frame_control;
+	_le16 duration;
+	_u8 ra[6];
+	_u8 ta[6];
+	_le16 control;
+	_le16 start_seq_num;
+	} __packed;
+(include/linux/ieee80211.h)
+
+

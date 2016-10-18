@@ -1,0 +1,668 @@
+chapter 14
+-----------
+struct nsproxy {
+      atomic_t count;
+       struct uts_namespace *uts_ns;
+       struct ipc_namespace *ipc_ns;
+       struct mnt_namespace *mnt_ns;
+       struct pid_namespace *pid_ns;        
+       struct net           *net_ns;
+};
+(include/linux/nsproxy.h)
+
+static struct nsproxy *create_new_namespaces(unsigned long flags,
+        struct task_struct *tsk, struct user_namespace *user_ns,
+        struct fs_struct *new_fs)
+{
+        struct nsproxy *new_nsp;
+        int err;
+
+        new_nsp = create_nsproxy();
+        if (!new_nsp)
+                return ERR_PTR(-ENOMEM);
+        . . .
+        
+        new_nsp->uts_ns = copy_utsname(flags, user_ns, tsk->nsproxy->uts_ns);
+        if (IS_ERR(new_nsp->uts_ns)) {
+                err = PTR_ERR(new_nsp->uts_ns);
+                goto out_uts;
+        }
+        . . .
+        new_nsp->net_ns = copy_net_ns(flags, user_ns, tsk->nsproxy->net_ns);
+        if (IS_ERR(new_nsp->net_ns)) {
+                err = PTR_ERR(new_nsp->net_ns);
+                goto out_net;
+        }
+        return new_nsp;
+}
+
+
+struct nsproxy init_nsproxy = {
+        .count  = ATOMIC_INIT(1),
+        .uts_ns = &init_uts_ns,
+#if defined(CONFIG_POSIX_MQUEUE) || defined(CONFIG_SYSVIPC)
+        .ipc_ns = &init_ipc_ns,
+#endif
+        .mnt_ns = NULL,
+        .pid_ns = &init_pid_ns,
+#ifdef CONFIG_NET
+        .net_ns = &init_net,
+#endif
+};
+(kernel/nsproxy.c)
+
+struct uts_namespace {
+        struct kref kref;
+        struct new_utsname name;
+        struct user_namespace *user_ns;
+        unsigned int proc_inum;
+};
+(include/linux/utsname.h)
+
+struct new_utsname {
+        char sysname[__NEW_UTS_LEN + 1];
+        char nodename[__NEW_UTS_LEN + 1];
+        char release[__NEW_UTS_LEN + 1];
+        char version[__NEW_UTS_LEN + 1];
+        char machine[__NEW_UTS_LEN + 1];
+        char domainname[__NEW_UTS_LEN + 1];
+};
+(include/uapi/linux/utsname.h)
+
+static inline struct new_utsname *utsname(void)
+{
+         return &current->nsproxy->uts_ns->name;
+}
+(include/linux/utsname.h)
+
+
+SYSCALL_DEFINE2(gethostname, char __user *, name, int, len)
+{
+        int i, errno;
+        struct new_utsname *u;
+
+        if (len < 0)
+                return -EINVAL;
+        down_read(&uts_sem);
+        u = utsname();
+        i = 1 + strlen(u->nodename);
+        if (i > len)
+                i = len;
+        errno = 0;
+
+        if (copy_to_user(name, u->nodename, i))
+                errno = -EFAULT;
+        up_read(&uts_sem);
+        return errno;
+}
+(kernel/sys.c)
+
+        
+struct net {
+        . . .
+        struct user_namespace   *user_ns;       /* Owning user namespace */
+        unsigned int            proc_inum;
+        struct proc_dir_entry   *proc_net;
+        struct proc_dir_entry   *proc_net_stat;
+        . . .
+        struct list_head        dev_base_head;
+        struct hlist_head       *dev_name_head;
+        struct hlist_head       *dev_index_head;
+        . . .
+        int                     ifindex;
+        . . .
+        struct net_device       *loopback_dev;   /* The loopback */
+        . . .
+        atomic_t                count;          /* To decided when the network
+                                                 *  namespace should be shut down.
+                                                 */
+
+        struct netns_ipv4       ipv4;
+#if IS_ENABLED(CONFIG_IPV6)
+        struct netns_ipv6       ipv6;
+#endif
+#if defined(CONFIG_IP_SCTP) || defined(CONFIG_IP_SCTP_MODULE)
+        struct netns_sctp       sctp;
+#endif
+       . . .
+
+#if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
+        struct netns_ct         ct;
+#endif
+#if IS_ENABLED(CONFIG_NF_DEFRAG_IPV6)
+        struct netns_nf_frag    nf_frag;
+#endif
+        . . .
+        struct net_generic __rcu  *gen;
+#ifdef CONFIG_XFRM
+        struct netns_xfrm       xfrm;
+#endif
+        . . .
+};
+(include/net/net_namespace.h)
+
+
+struct netns_ipv4 {
+    . . .
+#ifdef CONFIG_IP_MULTIPLE_TABLES
+        struct fib_rules_ops    *rules_ops;
+        bool                    fib_has_custom_rules;
+        struct fib_table        *fib_local;
+        struct fib_table        *fib_main;
+        struct fib_table        *fib_default;
+#endif
+   . . .
+        struct hlist_head       *fib_table_hash;
+        struct sock             *fibnl;
+
+        struct sock             **icmp_sk;
+   . . .
+#ifdef CONFIG_NETFILTER
+        struct xt_table         *iptable_filter;
+        struct xt_table         *iptable_mangle;
+        struct xt_table         *iptable_raw;
+        struct xt_table         *arptable_filter;
+#ifdef CONFIG_SECURITY
+        struct xt_table         *iptable_security;
+#endif
+        struct xt_table         *nat_table;
+#endif
+
+        int sysctl_icmp_echo_ignore_all;
+        int sysctl_icmp_echo_ignore_broadcasts;
+        int sysctl_icmp_ignore_bogus_error_responses;
+        int sysctl_icmp_ratelimit;
+        int sysctl_icmp_ratemask;
+        int sysctl_icmp_errors_use_inbound_ifaddr;
+
+        int sysctl_tcp_ecn;
+
+        kgid_t sysctl_ping_group_range[2];
+        long sysctl_tcp_mem[3];
+
+        atomic_t dev_addr_genid;
+
+#ifdef CONFIG_IP_MROUTE
+#ifndef CONFIG_IP_MROUTE_MULTIPLE_TABLES
+        struct mr_table         *mrt;
+#else
+        struct list_head        mr_tables;
+        struct fib_rules_ops    *mr_rules_ops;
+#endif
+#endif
+};
+(net/netns/ipv4.h)
+
+static int register_vlan_device(struct net_device *real_dev, u16 vlan_id)
+{
+    struct net_device *new_dev;
+    struct net *net = dev_net(real_dev);
+    . . .
+    new_dev = alloc_netdev(sizeof(struct vlan_dev_priv), name, vlan_setup);
+ 
+    if (new_dev == NULL)
+        return -ENOBUFS;
+    dev_net_set(new_dev, net);
+
+    . . .
+}
+
+struct pernet_operations {
+        . . .
+        int (*init)(struct net *net);
+        void (*exit)(struct net *net);
+        . . .
+        int *id;
+        size_t size;
+};
+(include/net/net_namespace.h)
+
+static struct pernet_operations pppoe_net_ops = {
+        .init = pppoe_init_net,
+        .exit = pppoe_exit_net,
+        .id   = &pppoe_net_id,
+        .size = sizeof(struct pppoe_net),
+}  
+(net/ppp/pppoe.c)
+
+static __net_init int pppoe_init_net(struct net *net)
+{
+        struct pppoe_net *pn = pppoe_pernet(net);
+        struct proc_dir_entry *pde;
+
+        rwlock_init(&pn->hash_lock);
+
+        pde = proc_create("pppoe", S_IRUGO, net->proc_net, &pppoe_seq_fops);
+#ifdef CONFIG_PROC_FS
+        if (!pde)
+                return -ENOMEM;
+#endif
+
+        return 0;
+}
+(net/ppp/pppoe.c)
+
+static __net_exit void pppoe_exit_net(struct net *net)
+{
+        remove_proc_entry("pppoe", net->proc_net);
+}
+(net/ppp/pppoe.c)
+
+static struct pernet_operations __net_initdata net_ns_ops = {
+        .init = net_ns_net_init,
+        .exit = net_ns_net_exit,
+};
+
+static int __init net_ns_init(void)
+{
+    . . .
+    register_pernet_subsys(&net_ns_ops);
+    . . .    
+}
+(net/core/net_namespace.c)
+
+static __net_init int net_ns_net_init(struct net *net)
+{
+        return proc_alloc_inum(&net->proc_inum);
+}
+
+static __net_exit void net_ns_net_exit(struct net *net)
+{
+        proc_free_inum(net->proc_inum);
+}
+
+
+int dev_change_net_namespace(struct net_device *dev, struct net *net, const char *pat)
+{
+        int err;
+
+        ASSERT_RTNL();
+
+                /* Don't allow namespace local devices to be moved. */
+        err = -EINVAL;
+        if (dev->features & NETIF_F_NETNS_LOCAL)
+                goto out;
+        . . .
+        dev_net_set(dev, net)
+        . . .
+
+out:
+        return err;   
+}     
+(net/core/dev.c)
+
+static struct file_system_type cgroup_fs_type = {
+        .name = "cgroup",
+        .mount = cgroup_mount,
+        .kill_sb = cgroup_kill_sb,
+};
+static const struct super_operations cgroup_ops = {
+        .statfs = simple_statfs,
+        .drop_inode = generic_delete_inode,
+        .show_options = cgroup_show_options,
+        .remount_fs = cgroup_remount,
+};
+(kernel/cgroup.c)
+
+static struct cftype mem_cgroup_files[] = {
+        {
+                .name = "usage_in_bytes",
+                .private = MEMFILE_PRIVATE(_MEM, RES_USAGE),
+                .read = mem_cgroup_read,
+                .register_event = mem_cgroup_usage_register_event,
+                .unregister_event = mem_cgroup_usage_unregister_event,
+        },
+        . . .
+
+struct cgroup_subsys mem_cgroup_subsys = {
+        .name = "memory",
+                . . .
+        .base_cftypes = mem_cgroup_files,
+};
+(mm/memcontrol.c)
+
+struct netprio_map {
+        struct rcu_head rcu;
+        u32 priomap_len;
+        u32 priomap[];
+};
+(include/net/netprio_cgroup.h)
+
+struct hci_dev {
+         char            name[8];
+         unsigned long   flags;
+         __u8            bus;
+         bdaddr_t        bdaddr;
+         __u8            dev_type;
+         . . . 
+         struct work_struct      rx_work;
+         struct work_struct      cmd_work;
+         . . . 
+         struct sk_buff_head     rx_q;
+         struct sk_buff_head     raw_q;
+         struct sk_buff_head     cmd_q;
+         . . .
+         int (*open)(struct hci_dev *hdev);
+         int (*close)(struct hci_dev *hdev);
+         int (*flush)(struct hci_dev *hdev);
+         int (*send)(struct sk_buff *skb);
+         void (*notify)(struct hci_dev *hdev, unsigned int evt);
+         int (*ioctl)(struct hci_dev *hdev, unsigned int cmd, unsigned long arg);
+}
+(include/net/bluetooth/hci_core.h)
+
+struct hci_conn {
+        struct list_head list;
+        atomic_t         refcnt;
+        bdaddr_t         dst;
+        . . .
+        __u8              type;
+
+}
+
+struct l2cap_hdr {
+        __le16     len;
+        __le16     cid;
+} __attribute__ ((packed));
+(include/net/bluetooth/l2cap.h)
+
+
+static struct packet_type lowpan_packet_type = {
+        .type = __constant_htons(ETH_P_IEEE802154),
+        .func = lowpan_rcv,
+};
+. . .
+static int __init lowpan_init_module(void)
+{
+        . . .
+        dev_add_pack(&lowpan_packet_type);
+        . . .
+}
+(net/ieee802154/6lowpan.c)
+
+
+static int __init nfc_init(void)
+{
+        int rc;
+        . . .
+Register the generic netlink NFC family and the NFC notifier callback, the nfc_genl_rcv_nl_event() method:
+        rc = nfc_genl_init();
+        if (rc)
+                goto err_genl;
+
+        /* the first generation must not be 0 */
+        nfc_devlist_generation = 1;
+
+        rc = rawsock_init();
+        if (rc)
+                goto err_rawsock;
+        rc = nfc_llcp_init();
+        if (rc)
+                goto err_llcp_sock;
+
+        rc = af_nfc_init();
+        if (rc)
+                goto err_af_nfc;
+
+        return 0;
+        . . . 
+}
+(net/nfc/core.c)
+        
+struct notifier_block {
+        int (*notifier_call)(struct notifier_block *, unsigned long, void *);
+        struct notifier_block __rcu *next;
+        int priority;
+};
+(include/linux/notifier.h)
+
+struct notifier_block br_device_notifier = {
+        .notifier_call = br_device_event
+};
+(net/bridge/br_notify.c)
+static int __init br_init(void)
+{
+        ...
+register_netdevice_notifier(&br_device_notifier);
+        ...
+}
+(net/bridge/br.c)
+
+
+static int br_device_event(struct notifier_block *unused, unsigned long event, void *ptr)
+{
+        struct net_device *dev = ptr;
+        struct net_bridge_port *p;
+        struct net_bridge *br;
+        bool changed_addr;
+        int err;
+        . . . 
+        switch (event) {
+        case NETDEV_CHANGEMTU:
+                dev_set_mtu(br->dev, br_min_mtu(br));
+                break;
+        . . .
+        }
+. . .
+}
+
+struct pci_device_id {
+        __u32 vendor, device;           /* Vendor and device ID or PCI_ANY_ID*/
+        __u32 subvendor, subdevice;     /* Subsystem ID's or PCI_ANY_ID */
+        __u32 class, class_mask;        /* (class,subclass,prog-if) triplet */
+        kernel_ulong_t driver_data;     /* Data private to the driver */
+};
+        
+(include/linux/mod_devicetable.h)
+
+struct pci_driver {
+    . . .
+    const char *name;
+    const struct pci_device_id *id_table;   /* must be non-NULL for probe to be called */
+    int  (*probe)  (struct pci_dev *dev, const struct pci_device_id *id);   /* New device inserted */
+    void (*remove) (struct pci_dev *dev);   /* Device removed (NULL if not a hot-plug capable driver) */
+    int  (*suspend) (struct pci_dev *dev, pm_message_t state);      /* Device suspended */
+    . . .
+    int  (*resume) (struct pci_dev *dev);                   /* Device woken up */
+    . . .
+};
+(include/linux/pci.h)
+
+struct pci_dev {
+        . . .
+        unsigned short  vendor;
+        unsigned short  device;
+        unsigned short  subsystem_vendor;
+        unsigned short  subsystem_device;
+        . . .        
+        struct pci_driver *driver;      /* which driver has allocated this device */
+        . . .        
+        pci_power_t     current_state;  /* Current operating state. In ACPI-speak,
+                                           this is D0-D3, D0 being fully functional,
+                                           and D3 being off. */
+        struct  device  dev;            /* Generic device interface */
+
+        int             cfg_size;       /* Size of configuration space */
+
+        unsigned int    irq;
+};
+(include/linux/pci.h)
+
+struct pppoe_hdr {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+        __u8 ver : 4;
+        __u8 type : 4;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+        __u8 type : 4;
+        __u8 ver : 4;
+#else
+#error  "Please fix <asm/byteorder.h>"
+#endif
+        __u8 code;
+        __be16 sid;
+        __be16 length;
+        struct pppoe_tag tag[0];
+} __packed;
+(include/uapi/linux/if_pppox.h)
+
+static struct packet_type pppoes_ptype __read_mostly = {
+        .type   = cpu_to_be16(ETH_P_PPP_SES),
+        .func   = pppoe_rcv,
+};
+
+static struct packet_type pppoed_ptype __read_mostly = {
+        .type   = cpu_to_be16(ETH_P_PPP_DISC),
+        .func   = pppoe_disc_rcv,
+};
+
+static int __init pppoe_init(void)
+{
+        int err;
+
+
+        dev_add_pack(&pppoes_ptype);
+        dev_add_pack(&pppoed_ptype);
+        . . . 
+     
+        return 0;
+
+}
+
+struct pppox_sock {
+        /* struct sock must be the first member of pppox_sock */
+        struct sock sk;
+        struct ppp_channel chan;
+        struct pppox_sock       *next;    /* for hash table */
+        union {
+                struct pppoe_opt pppoe;
+                struct pptp_opt  pptp;
+        } proto;
+        __be16                  num;
+};
+(include/linux/if_pppox.h)
+
+struct pppoe_addr {
+        sid_t         sid;                    /* Session identifier */
+        unsigned char remote[ETH_ALEN];       /* Remote address */
+        char          dev[IFNAMSIZ];          /* Local device to use */
+};
+(include/uapi/linux/if_pppox.h)
+
+static const struct proto_ops pppoe_ops = {
+        .family         = AF_PPPOX,
+        .owner          = THIS_MODULE,
+        .release        = pppoe_release,
+        .bind           = sock_no_bind,
+        .connect        = pppoe_connect,
+        . . .
+        .sendmsg        = pppoe_sendmsg,
+        .recvmsg        = pppoe_recvmsg,
+        . . .
+        .ioctl          = pppox_ioctl,
+};
+
+static int pppoe_create(struct net *net, struct socket *sock)
+{
+        struct sock *sk;
+
+        sk = sk_alloc(net, PF_PPPOX, GFP_KERNEL, &pppoe_sk_proto);
+        if (!sk)
+                return -ENOMEM;
+
+        sock_init_data(sock, sk);
+
+        sock->state     = SS_UNCONNECTED;
+        sock->ops       = &pppoe_ops;
+
+        sk->sk_backlog_rcv      = pppoe_rcv_core;
+        sk->sk_state            = PPPOX_NONE;
+        sk->sk_type             = SOCK_STREAM;
+        sk->sk_family           = PF_PPPOX;
+        sk->sk_protocol         = PX_PROTO_OE;
+
+        return 0;
+}  
+(drivers/net/ppp/pppoe.c)
+
+static int pppoe_connect(struct socket *sock, struct sockaddr *uservaddr,
+                  int sockaddr_len, int flags)
+{
+        struct sock *sk = sock->sk;
+        struct sockaddr_pppox *sp = (struct sockaddr_pppox *)uservaddr;
+        struct pppox_sock *po = pppox_sk(sk);
+        struct net_device *dev = NULL;
+        struct pppoe_net *pn;
+        struct net *net = NULL;
+        int error;
+        
+        lock_sock(sk);
+
+        error = -EINVAL;
+        if (sp->sa_protocol != PX_PROTO_OE)
+                goto end;
+
+        /* Check for already bound sockets */
+        error = -EBUSY;
+        
+        if ((sk->sk_state & PPPOX_CONNECTED) &&
+             stage_session(sp->sa_addr.pppoe.sid))
+                goto end;
+        . . .
+        /* Re-bind in session stage only */
+        if (stage_session(sp->sa_addr.pppoe.sid)) {
+                error = -ENODEV;
+                net = sock_net(sk);
+                dev = dev_get_by_name(net, sp->sa_addr.pppoe.dev);
+                if (!dev)
+                        goto err_put;
+
+                po->pppoe_dev = dev;
+                po->pppoe_ifindex = dev->ifindex;
+                pn = pppoe_pernet(net);
+                
+                if (!(dev->flags & IFF_UP)) {
+                        goto err_put;
+                }
+
+                memcpy(&po->pppoe_pa,
+                       &sp->sa_addr.pppoe,
+                       sizeof(struct pppoe_addr));
+
+                write_lock_bh(&pn->hash_lock);
+        
+                error = __set_item(pn, po);
+                write_unlock_bh(&pn->hash_lock);
+
+                if (error < 0)
+                        goto err_put;
+                po->chan.hdrlen = (sizeof(struct pppoe_hdr) +
+                                   dev->hard_header_len);
+
+                po->chan.mtu = dev->mtu - sizeof(struct pppoe_hdr);
+                po->chan.private = sk;
+                po->chan.ops = &pppoe_chan_ops;
+
+                error = ppp_register_net_channel(dev_net(dev), &po->chan);
+                if (error) {
+                        delete_item(pn, po->pppoe_pa.sid,
+                                    po->pppoe_pa.remote, po->pppoe_ifindex);
+                        goto err_put;
+                }
+                	sk->sk_state = PPPOX_CONNECTED;
+        }
+
+        po->num = sp->sa_addr.pppoe.sid;
+
+end:
+        release_sock(sk);
+        return error;
+err_put:
+        if (po->pppoe_dev) {
+                dev_put(po->pppoe_dev);
+                po->pppoe_dev = NULL;
+        }
+        goto end;
+}
+                	
+        
+

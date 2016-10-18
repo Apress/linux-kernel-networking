@@ -1,0 +1,568 @@
+chapter 9
+-----------   
+
+static inline int NF_HOOK(uint8_t pf, unsigned int hook, struct sk_buff *skb,
+			  struct net_device *in, struct net_device *out,
+                          int (*okfn)(struct sk_buff *))  
+{
+	return NF_HOOK_THRESH(pf, hook, skb, in, out, okfn, INT_MIN);
+}
+
+struct nf_hook_ops {
+	struct list_head list;
+	/* User fills in from here down. */
+	nf_hookfn *hook;
+	struct module *owner;
+	u_int8_t pf;
+	unsigned int hooknum;
+	/* Hooks are ordered in ascending priority. */
+	int priority;
+}
+(include/linux/netfilter.h)
+
+static struct nf_hook_ops ipv4_conntrack_ops[] __read_mostly = {
+        {
+                .hook           = ipv4_conntrack_in,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_PRE_ROUTING,
+                .priority       = NF_IP_PRI_CONNTRACK,
+        },
+        {
+                .hook           = ipv4_conntrack_local,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_LOCAL_OUT,
+                .priority       = NF_IP_PRI_CONNTRACK,
+        },
+        {
+                .hook           = ipv4_helper,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_POST_ROUTING,
+                .priority       = NF_IP_PRI_CONNTRACK_HELPER,
+        },
+        {
+                .hook           = ipv4_confirm,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_POST_ROUTING,
+                .priority       = NF_IP_PRI_CONNTRACK_CONFIRM,
+        },
+        {
+                .hook           = ipv4_helper,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_LOCAL_IN,
+                .priority       = NF_IP_PRI_CONNTRACK_HELPER,
+        },
+        {
+                .hook           = ipv4_confirm,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_LOCAL_IN,
+                .priority       = NF_IP_PRI_CONNTRACK_CONFIRM,
+        },
+};
+(net/ipv4/netfilter/nf_conntrack_l3proto_ipv4.c)
+
+in nf_conntrack_l3proto_ipv4_init(void) {
+	. . .
+	ret = nf_register_hooks(ipv4_conntrack_ops,
+		ARRAY_SIZE(ipv4_conntrack_ops))
+	. . .
+}
+
+struct nf_conntrack_tuple {
+	struct nf_conntrack_man src;
+	/* These are the parts of the tuple which are fixed. */
+	struct {
+		union nf_inet_addr u3;
+		union {
+			/* Add other protocols here. */
+			_be16 all;
+			struct {
+				_be16 port;
+			} tcp;
+			struct {
+				_be16 port;
+			} udp;
+			struct {
+				u_int8_t type, code;
+			} icmp;
+			struct {
+				_be16 port;
+			} dccp;
+			struct {
+				_be16 port;
+			} sctp;
+			struct {
+				_be16 key;
+			} gre;
+		} u;
+		/* The protocol. */
+		u_int8_t protonum;
+		/* The direction (for tuplehash) */
+		u_int8_t dir;
+	} dst;
+};
+(include/net/netfilter/nf_conntrack_tuple.h)
+
+
+struct nf_conn {
+	/* Usage count in here is 1 for hash table/destruct timer, 1 per skb,
+	plus 1 for any connection(s) we are `master' for */
+	struct nf_conntrack ct_general;
+	spinlock_t lock;
+	/* XXX should I move this to the tail ? - Y.K */
+	/* These are my tuples; original and reply */
+	struct nf_conntrack_tuple_hash tuplehash[IP_CT_DIR_MAX];
+	/* Have we seen traffic both ways yet? (bitset) */
+	unsigned long status;
+	/* If we were expected by an expectation, this will be it */
+	struct nf_conn *master;
+	/* Timer function; drops refcnt when it goes off. */
+	struct timer_list timeout;
+	. . .
+	/* Extensions */
+	struct nf_ct_ext *ext;
+#ifdef CONFIG_NET_NS
+	struct net *ct_net;
+#endif
+	/* Storage reserved for other modules, must be the last member */
+	union nf_conntrack_proto proto;
+};
+(include/net/netfilter/nf_conntrack.h)
+
+unsigned int nf_conntrack_in(struct net *net, u_int8_t pf, unsigned int hooknum,
+				struct sk_buff *skb)
+{
+	struct nf_conn *ct, *tmpl = NULL;
+	enum ip_conntrack_info ctinfo;
+	struct nf_conntrack_l3proto *l3proto;
+	struct nf_conntrack_l4proto *l4proto;
+	unsigned int *timeouts;
+	unsigned int dataoff;
+	u_int8_t protonum;
+	int set_reply = 0;
+	int ret;
+	if (skb->nfct) {
+		/* Previously seen (loopback or untracked)? Ignore. */
+		tmpl = (struct nf_conn *)skb->nfct;
+		if (!nf_ct_is_template(tmpl)) {
+			NF_CT_STAT_INC_ATOMIC(net, ignore);
+			return NF_ACCEPT;
+		}
+		skb->nfct = NULL;
+	}
+	l3proto = __nf_ct_l3proto_find(pf);
+	ret = l3proto->get_l4proto(skb, skb_network_offset(skb),
+					&dataoff, &protonum);
+	if (ret <= 0) {
+		. . .
+		ret = -ret;
+		goto out;
+	}
+	l4proto = __nf_ct_l4proto_find(pf, protonum);
+	
+	/* It may be an special packet, error, unclean...
+	* inverse of the return code tells to the netfilter
+	* core what to do with the packet. */
+
+	if (l4proto->error != NULL) {
+		ret = l4proto->error(net, tmpl, skb, dataoff, &ctinfo,
+			pf, hooknum);
+		if (ret <= 0) {
+			NF_CT_STAT_INC_ATOMIC(net, error);
+			NF_CT_STAT_INC_ATOMIC(net, invalid);
+			ret = -ret;
+			goto out;
+		}
+		/* ICMP[v6] protocol trackers may assign one conntrack. */
+		if (skb->nfct)
+			goto out;
+	}
+	ct = resolve_normal_ct(net, tmpl, skb, dataoff, pf, protonum,
+		l3proto, l4proto, &set_reply, &ctinfo);
+	if (!ct) {
+		/* Not valid part of a connection */
+		NF_CT_STAT_INC_ATOMIC(net, invalid);
+		ret = NF_ACCEPT;
+		goto out;
+	}
+	if (IS_ERR(ct)) {
+		/* Too stressed to deal. */
+		NF_CT_STAT_INC_ATOMIC(net, drop);
+		ret = NF_DROP;
+		goto out;
+	}
+	NF_CT_ASSERT(skb->nfct);
+
+	/* Decide what timeout policy we want to apply to this flow. */
+	timeouts = nf_ct_timeout_lookup(net, ct, l4proto);
+	ret = l4proto->packet(ct, skb, dataoff, ctinfo, pf, hooknum, timeouts);
+	if (ret <= 0) {
+		/* Invalid: inverse of the return code tells
+		* the netfilter core what to do */
+		pr_debug("nf_conntrack_in: Can't track with proto module\n");
+		nf_conntrack_put(skb->nfct);
+		skb->nfct = NULL;
+		NF_CT_STAT_INC_ATOMIC(net, invalid);
+		if (ret == -NF_DROP)
+			NF_CT_STAT_INC_ATOMIC(net, drop);
+		ret = -ret;
+		goto out;
+	}
+	if (set_reply && !test_and_set_bit(IPS_SEEN_REPLY_BIT, &ct->status))
+		nf_conntrack_event_cache(IPCT_REPLY, ct);
+out:
+	if (tmpl) {
+		/* Special case: we have to repeat this hook, assign the
+		* template again to this packet. We assume that this packet
+		* has no conntrack assigned. This is used by nf_ct_tcp. */
+		if (ret == NF_REPEAT)
+			skb->nfct = (struct nf_conntrack *)tmpl;
+		else
+			nf_ct_put(tmpl);
+	}
+	return ret;
+}	
+	
+static int help(struct sk_buff *skb,
+                unsigned int protoff,
+                struct nf_conn *ct,
+                enum ip_conntrack_info ctinfo)
+{
+	. . .
+        struct nf_conntrack_expect *exp;
+        . . .
+        for (i = 0; i < ARRAY_SIZE(search[dir]); i++) {
+                found = find_pattern(fb_ptr, datalen,
+                                     search[dir][i].pattern,
+                                     search[dir][i].plen,
+                                     search[dir][i].skip,
+                                     search[dir][i].term,
+                                     &matchoff, &matchlen,
+                                     &cmd,
+                                     search[dir][i].getnum);
+                if (found) break;
+        }
+        if (found == -1) {
+                /* We don't usually drop packets.  After all, this is
+                   connection tracking, not packet filtering.
+                   However, it is necessary for accurate tracking in
+                   this case. */
+                nf_ct_helper_log(skb, ct, "partial matching of `%s'",
+                                 search[dir][i].pattern);
+                ret = NF_DROP;
+                goto out;
+        } else if (found == 0) { /* No match */
+                ret = NF_ACCEPT;
+                goto out_update_nl;
+        }
+
+        pr_debug("conntrack_ftp: match `%.*s' (%u bytes at %u)\n",
+                 matchlen, fb_ptr + matchoff,
+                 matchlen, ntohl(th->seq) + matchoff);
+
+        exp = nf_ct_expect_alloc(ct);
+        . . .
+        nf_ct_expect_init(exp, NF_CT_EXPECT_CLASS_DEFAULT, cmd.l3num,
+        	&ct->tuplehash[!dir].tuple.src.u3, daddr,
+        	IPPROTO_TCP, NULL, &cmd.u.tcp.port);
+        . . .
+}
+(net/netfilter/nf_conntrack_ftp.c)
+
+static struct nf_conntrack_tuple_hash *
+init_conntrack(struct net *net, struct nf_conn *tmpl,
+		const struct nf_conntrack_tuple *tuple,
+		struct nf_conntrack_l3proto *l3proto,
+		struct nf_conntrack_l4proto *l4proto,
+		struct sk_buff *skb,
+		unsigned int dataoff, u32 hash)
+{
+	struct nf_conn *ct;
+	struct nf_conn_help *help;
+	struct nf_conntrack_tuple repl_tuple;
+	struct nf_conntrack_ecache *ecache;
+	struct nf_conntrack_expect *exp;
+	u16 zone = tmpl ? nf_ct_zone(tmpl) : NF_CT_DEFAULT_ZONE;
+	struct nf_conn_timeout *timeout_ext;
+	unsigned int *timeouts;
+	. . .
+	ct = __nf_conntrack_alloc(net, zone, tuple, &repl_tuple, GFP_ATOMIC,
+					hash);
+	. . .
+	exp = nf_ct_find_expectation(net, zone, tuple);
+	if (exp) {
+		pr_debug("conntrack: expectation arrives ct=%p exp=%p\n",
+			ct, exp);
+		/* Welcome, Mr. Bond. We've been expecting you... */
+		_set_bit(IPS_EXPECTED_BIT, &ct->status);
+		ct->master = exp->master;
+		if (exp->helper) {
+			help = nf_ct_helper_ext_add(ct, exp->helper,
+				GFP_ATOMIC);
+			if (help)
+				rcu_assign_pointer(help->helper, exp->helper);
+		}
+	. . .
+
+#define FILTER_VALID_HOOKS ((1 << NF_INET_LOCAL_IN) | \
+	(1 << NF_INET_FORWARD) | \
+	(1 << NF_INET_LOCAL_OUT))
+
+static const struct xt_table packet_filter = {
+	.name = "filter",
+	.valid_hooks = FILTER_VALID_HOOKS,
+	.me = THIS_MODULE,
+	.af = NFPROTO_IPV4,
+	.priority = NF_IP_PRI_FILTER,
+};
+(net/ipv4/netfilter/iptable_filter.c)
+
+static struct nf_hook_ops *filter_ops __read_mostly;
+
+static int __init iptable_filter_init(void)
+{
+	. . .
+	filter_ops = xt_hook_link(&packet_filter, iptable_filter_hook);
+	. . .
+}
+
+static int __net_init iptable_filter_net_init(struct net *net)
+{
+	. . .
+	net->ipv4.iptable_filter =
+	ipt_register_table(net, &packet_filter, repl);
+	. . .
+	return PTR_RET(net->ipv4.iptable_filter);
+}
+
+int ip_local_deliver(struct sk_buff *skb)
+{
+. . .
+	return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_IN, skb, skb->dev, NULL,
+			ip_local_deliver_finish);
+}
+
+
+static unsigned int iptable_filter_hook(unsigned int hook, struct sk_buff *skb,
+					const struct net_device *in,
+					const struct net_device *out,
+					int (*okfn)(struct sk_buff *))
+{
+	const struct net *net;
+	. . .
+	net = dev_net((in != NULL) ? in : out);
+	. . .
+	return ipt_do_table(skb, hook, in, out, net->ipv4.iptable_filter);
+}
+(net/ipv4/netfilter/iptable_filter.c)
+
+int ip_forward(struct sk_buff *skb)
+{
+	. . .
+	return NF_HOOK(NFPROTO_IPV4, NF_INET_FORWARD, skb, skb->dev,
+			rt->dst.dev, ip_forward_finish);
+	. . .
+
+static const struct xt_table nf_nat_ipv4_table = {
+	.name = "nat",
+	.valid_hooks = (1 << NF_INET_PRE_ROUTING) |
+	(1 << NF_INET_POST_ROUTING) |
+	(1 << NF_INET_LOCAL_OUT) |
+	(1 << NF_INET_LOCAL_IN),
+	.me = THIS_MODULE,
+	.af = NFPROTO_IPV4,
+};
+(net/ipv4/netfilter/iptable_nat.c)
+
+static struct nf_hook_ops nf_nat_ipv4_ops[] __read_mostly = {
+        /* Before packet filtering, change destination */
+        {
+                .hook           = nf_nat_ipv4_in,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_PRE_ROUTING,
+                .priority       = NF_IP_PRI_NAT_DST,
+        },
+        /* After packet filtering, change source */
+        {
+                .hook           = nf_nat_ipv4_out,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_POST_ROUTING,
+                .priority       = NF_IP_PRI_NAT_SRC,
+        },
+        /* Before packet filtering, change destination */
+        {
+                .hook           = nf_nat_ipv4_local_fn,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_LOCAL_OUT,
+                .priority       = NF_IP_PRI_NAT_DST,
+        },
+        /* After packet filtering, change source */
+        {
+                .hook           = nf_nat_ipv4_fn,
+                .owner          = THIS_MODULE,
+                .pf             = NFPROTO_IPV4,
+                .hooknum        = NF_INET_LOCAL_IN,
+                .priority       = NF_IP_PRI_NAT_SRC,
+        },
+};
+static int __init iptable_nat_init(void)
+{
+	int err;
+	. . .
+	err = nf_register_hooks(nf_nat_ipv4_ops, ARRAY_SIZE(nf_nat_ipv4_ops));
+	if (err < 0)
+		goto err2;
+	return 0;
+	. . .
+}
+(net/ipv4/netfilter/iptable_nat.c)
+
+static unsigned int nf_nat_ipv4_fn(unsigned int hooknum,
+				   struct sk_buff *skb,
+                                   const struct net_device *in,
+                                   const struct net_device *out,
+                                   int (*okfn)(struct sk_buff *))
+{
+	struct nf_conn *ct;
+	. . .
+	/* Don't try to NAT if this packet is not conntracked */
+	if (nf_ct_is_untracked(ct))
+		return NF_ACCEPT;
+	. . .
+}
+(net/ipv4/netfilter/iptable_nat.c)
+
+static bool tcp_manip_pkt(struct sk_buff *skb,
+				const struct nf_nat_l3proto *l3proto,
+				unsigned int iphdroff, unsigned int hdroff,
+				const struct nf_conntrack_tuple *tuple,
+				enum nf_nat_manip_type maniptype)
+{
+	struct tcphdr *hdr;
+	_be16 *portptr, newport, oldport;
+	int hdrsize = 8; /* TCP connection tracking guarantees this much */
+	/* this could be an inner header returned in icmp packet; in such
+	cases we cannot update the checksum field since it is outside of
+	the 8 bytes of transport layer headers we are guaranteed */
+	if (skb->len >= hdroff + sizeof(struct tcphdr))
+		hdrsize = sizeof(struct tcphdr);
+	if (!skb_make_writable(skb, hdroff + hdrsize))
+		return false;
+	hdr = (struct tcphdr *)(skb->data + hdroff);    
+          if (maniptype == NF_NAT_MANIP_SRC) {
+          	  /* Get rid of src port */
+          	  newport = tuple->src.u.tcp.port;
+          	  portptr = &hdr->source;
+          } else {
+          	  /* Get rid of dst port */
+          	  newport = tuple->dst.u.tcp.port;
+          	  portptr = &hdr->dest;
+          }
+          
+          oldport = *portptr;
+          *portptr = newport;
+          if (hdrsize < sizeof(*hdr))
+          	  return true;
+
+          l3proto->csum_update(skb, iphdroff, &hdr->check, tuple, maniptype);
+          inet_proto_csum_replace2(&hdr->check, skb, oldport, newport, 0);
+          return true;
+}
+static unsigned int     
+nf_nat_ipv4_fn(unsigned int hooknum,
+               struct sk_buff *skb,
+               const struct net_device *in,
+               const struct net_device *out,
+               int (*okfn)(struct sk_buff *))
+{
+        struct nf_conn *ct;
+        enum ip_conntrack_info ctinfo;
+        struct nf_conn_nat *nat;
+        /* maniptype == SRC for postrouting. */
+        enum nf_nat_manip_type maniptype = HOOK2MANIP(hooknum);
+
+        /* We never see fragments: conntrack defrags on pre-routing
+         * and local-out, and nf_nat_out protects post-routing.
+         */
+        NF_CT_ASSERT(!ip_is_fragment(ip_hdr(skb)));
+
+        ct = nf_ct_get(skb, &ctinfo);
+        /* Can't track?  It's not due to stress, or conntrack would
+         * have dropped it.  Hence it's the user's responsibilty to
+         * packet filter it out, or implement conntrack/NAT for that
+         * protocol. 8) --RR
+         */
+        if (!ct)
+                return NF_ACCEPT;
+
+        /* Don't try to NAT if this packet is not conntracked */
+        if (nf_ct_is_untracked(ct))
+                return NF_ACCEPT;
+
+        nat = nfct_nat(ct);
+        if (!nat) {
+                /* NAT module was loaded late. */
+                if (nf_ct_is_confirmed(ct))
+                        return NF_ACCEPT;
+                nat = nf_ct_ext_add(ct, NF_CT_EXT_NAT, GFP_ATOMIC);
+                if (nat == NULL) {
+                        pr_debug("failed to add NAT extension\n");
+                        return NF_ACCEPT;
+                }
+        }
+
+        switch (ctinfo) {
+        case IP_CT_RELATED:
+        case IP_CT_RELATED_REPLY:
+                if (ip_hdr(skb)->protocol == IPPROTO_ICMP) {
+                        if (!nf_nat_icmp_reply_translation(skb, ct, ctinfo,
+                                                           hooknum))
+                                return NF_DROP;
+                        else
+                                return NF_ACCEPT;
+                }
+                /* Fall thru... (Only ICMPs can be IP_CT_IS_REPLY) */
+        case IP_CT_NEW:
+                /* Seen it before?  This can happen for loopback, retrans,
+                 * or local packets.
+                 */
+                if (!nf_nat_initialized(ct, maniptype)) {
+                        unsigned int ret;
+
+                        ret = nf_nat_rule_find(skb, hooknum, in, out, ct);
+                        if (ret != NF_ACCEPT)
+                                return ret;
+                } else {
+                        pr_debug("Already setup manip %s for ct %p\n",
+                                 maniptype == NF_NAT_MANIP_SRC ? "SRC" : "DST",
+                                 ct);
+                        if (nf_nat_oif_changed(hooknum, ctinfo, nat, out))
+                                goto oif_changed;
+                }
+                break;
+
+        default:
+                /* ESTABLISHED */
+                NF_CT_ASSERT(ctinfo == IP_CT_ESTABLISHED ||
+                             ctinfo == IP_CT_ESTABLISHED_REPLY);
+                if (nf_nat_oif_changed(hooknum, ctinfo, nat, out))
+                        goto oif_changed;
+        }
+
+        return nf_nat_packet(ct, ctinfo, hooknum, skb);
+
+oif_changed:
+        nf_ct_kill_acct(ct, ctinfo, skb);
+        return NF_DROP;
+}
+
+
+
